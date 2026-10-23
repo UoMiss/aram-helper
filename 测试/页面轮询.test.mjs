@@ -5,14 +5,14 @@ import { createAssistant } from "../src/assistant.ts";
 const game = (gameId = 1) => ({ gameId, gameMode: "ARAM", gameDuration: 1200, timestamp: Date.now(), players: [], hasAccurateFloors: true });
 const deferred = () => { let resolve; let reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const flush = () => new Promise(setImmediate);
-function setup(overrides = {}) {
+function setup(overrides = {}, isWindowActive = async () => true) {
   const jobs = new Map(); let next = 0; let shown = 0;
   const calls = [];
   const handlers = { check_connection: () => "测试玩家", get_gameflow_phase: () => "Lobby", get_damage_ranking: () => game(), get_match_list: () => [], get_game_result: () => game(), ...overrides };
   const app = createAssistant(async (command, args) => { calls.push(command); return handlers[command]?.(args); }, async () => { shown++; }, {
     setTimeout(fn) { const id = ++next; jobs.set(id, fn); return id; },
     clearTimeout(id) { jobs.delete(id); },
-  });
+  }, isWindowActive);
   return { app, handlers, calls, jobs, get shown() { return shown; }, async tick() {
     assert.equal(jobs.size, 1, "始终只有一个待运行轮询");
     const [id, fn] = jobs.entries().next().value; jobs.delete(id); fn(); await flush();
@@ -102,4 +102,13 @@ test("新一局结束但接口暂时返回上一局时，继续等待新结果",
   assert.equal(ctx.shown, 1); assert.equal(ctx.app.state.page, "status");
   ctx.handlers.get_damage_ranking = () => game(2); await ctx.tick();
   assert.equal(ctx.shown, 2); assert.equal(ctx.app.state.gameResult.gameId, 2); ctx.app.stop();
+});
+
+test("历史页收进托盘后，下一局结算仍会显示；前台阅读时保持页面", async () => {
+  let active = true;
+  const ctx = setup({}, async () => active); await ctx.app.start(); await ctx.app.loadHistory();
+  ctx.handlers.get_gameflow_phase = () => "EndOfGame"; await ctx.tick();
+  assert.equal(ctx.app.state.page, "history"); assert.equal(ctx.shown, 0);
+  active = false; await ctx.tick();
+  assert.equal(ctx.app.state.page, "result"); assert.equal(ctx.shown, 1); ctx.app.stop();
 });

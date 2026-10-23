@@ -21,7 +21,7 @@ const defaultClock: Clock = {
 const newGamePhases = ["ChampSelect", "ReadyCheck", "Matchmaking", "GameStart", "InProgress"];
 
 // 连接轮询独立于页面导航；每次请求完成后才安排下一次轮询。
-export function createAssistant(invoke: Invoke, showResult: () => Promise<void>, clock = defaultClock) {
+export function createAssistant(invoke: Invoke, showResult: () => Promise<void>, clock = defaultClock, isWindowActive: () => Promise<boolean> = async () => true) {
   const state = reactive({
     page: "status" as Page,
     cameFrom: "status" as Page,
@@ -75,7 +75,10 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
       if (disposed) return;
       // 手动查看的历史结果一直保留，只有自动结算页会随新对局收起。
       if (automaticResult && newGamePhases.includes(phase)) goHome();
-      if (phase === "EndOfGame" && !endHandled && state.page === "status" && !state.loading) {
+      if (phase === "EndOfGame" && !endHandled && !state.loading && !state.historyLoading) {
+        // 前台保留用户正在阅读的页面；托盘/最小化时仍可显示下一局结算。
+        if (state.page !== "status" && await isWindowActive()) return;
+        if (disposed) return;
         const id = navigation;
         state.loading = true;
         try {

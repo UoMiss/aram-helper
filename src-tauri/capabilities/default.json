@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "默认权限",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-show",
@@ -17,6 +19,8 @@
     "updater:allow-install",
     "updater:allow-download-and-install",
     "process:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "core:window:allow-is-visible",
+    "core:window:allow-is-minimized"
   ]
 }

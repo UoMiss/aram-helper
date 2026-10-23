@@ -13,6 +13,9 @@ const assistant = createAssistant(invoke, async () => {
   const window = getCurrentWindow();
   await window.show();
   await window.unminimize();
+}, undefined, async () => {
+  const window = getCurrentWindow();
+  return await window.isVisible() && !await window.isMinimized();
 });
 const { page, connStatus, summonerName, gamePhase, errorMsg, connectionError,
   loading, historyLoading, connecting, gameResult, matchList } = toRefs(assistant.state);
