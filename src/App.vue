@@ -1,43 +1,31 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch, nextTick, toRefs } from "vue";
+import { getVersion } from "@tauri-apps/api/app";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { createAssistant } from "./assistant";
 import { invoke } from "@tauri-apps/api/core";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import html2canvas from "html2canvas-pro";
-import { RULES, getRule, type GameResult } from "./rules";
+import { RULES, getRule } from "./rules";
 
-// ────── 类型 ──────
-
-interface MatchSummary {
-  gameId: number;
-  gameMode: string;
-  gameDuration: number;
-  timestamp: number;
-  championId: number;
-}
-
-// ────── 状态 ──────
-
-type Page = "status" | "result" | "history" | "settings";
-const page = ref<Page>("status");
-const cameFrom = ref<Page>("status");
-const connStatus = ref<"disconnected" | "connected">("disconnected");
-const summonerName = ref("");
-const gamePhase = ref("");
-const errorMsg = ref("");
-const loading = ref(false);
-
-const gameResult = ref<GameResult | null>(null);
-const matchList = ref<MatchSummary[]>([]);
-const historyLoading = ref(false);
+const assistant = createAssistant(invoke, async () => {
+  const window = getCurrentWindow();
+  await window.show();
+  await window.unminimize();
+});
+const { page, connStatus, summonerName, gamePhase, errorMsg, connectionError,
+  loading, historyLoading, connecting, gameResult, matchList } = toRefs(assistant.state);
+const { viewLastGame, loadHistory, viewGame, goBack, openSettings, retryConnection } = assistant;
+const appVersion = ref("");
 
 // 当前规则（从 localStorage 读取）
-const currentRuleId = ref<string>(localStorage.getItem("ruleId") || "classic");
+const currentRuleId = ref<string>(getRule(localStorage.getItem("ruleId") || "classic").id);
 watch(currentRuleId, (v) => localStorage.setItem("ruleId", v));
 
 // 4 人局模式（组队 vs 个人战），仅影响经典规则
 const fourPlayerMode = ref<"team" | "solo">(
-  (localStorage.getItem("4pMode") as "team" | "solo") || "team"
+  localStorage.getItem("4pMode") === "solo" ? "solo" : "team"
 );
 watch(fourPlayerMode, (v) => localStorage.setItem("4pMode", v));
 
@@ -82,11 +70,11 @@ function computeTargetHeight(): number {
         h += 96 + wrap * 28; // 输家横幅（名字 + slogan）
       }
       for (const t of r.teams) {
-        h += 64; // 队伍头部 + 边框 + margin
+        h += 84; // 队伍头部、统计列名、边框和间距
         h += t.players.length * 24; // 每个玩家行
       }
       h += 16; // 底部安全 buffer
-      h += 24; // 水印
+      h += 54; // 规则说明和水印
       h += 50; // 分享按钮
     } else {
       h += 100;
@@ -110,150 +98,6 @@ watch([page, ruleResult, fourPlayerMode, updateState], () => {
 });
 const loserTeam = computed(() => ruleResult.value?.teams.find((t) => t.isLoser));
 
-// ────── 轮询 ──────
-
-let pollTimer: ReturnType<typeof setTimeout> | null = null;
-function clearPoll() {
-  if (pollTimer) {
-    clearTimeout(pollTimer);
-    pollTimer = null;
-  }
-}
-
-async function pollConnection() {
-  try {
-    summonerName.value = await invoke<string>("check_connection");
-    errorMsg.value = "";
-    connStatus.value = "connected";
-    pollGamePhase();
-  } catch (e) {
-    connStatus.value = "disconnected";
-    errorMsg.value = String(e);
-    pollTimer = setTimeout(pollConnection, 5000);
-  }
-}
-
-async function pollGamePhase() {
-  try {
-    const phase = await invoke<string>("get_gameflow_phase");
-    gamePhase.value = phase;
-
-    if (phase === "ChampSelect") {
-      await invoke("capture_champ_select").catch(() => {});
-    }
-
-    if (phase === "EndOfGame" || phase === "WaitingForStats") {
-      await fetchLatestResult();
-    } else {
-      pollTimer = setTimeout(pollGamePhase, 3000);
-    }
-  } catch {
-    connStatus.value = "disconnected";
-    pollTimer = setTimeout(pollConnection, 5000);
-  }
-}
-
-// ────── 数据获取 ──────
-
-async function fetchLatestResult() {
-  loading.value = true;
-  try {
-    gameResult.value = await invoke<GameResult>("get_damage_ranking");
-    cameFrom.value = "status";
-    page.value = "result";
-    startAutoDismissPoll();
-  } catch (e) {
-    errorMsg.value = String(e);
-    pollTimer = setTimeout(pollGamePhase, 3000);
-  } finally {
-    loading.value = false;
-  }
-}
-
-async function viewLastGame() {
-  loading.value = true;
-  errorMsg.value = "";
-  clearPoll();
-  try {
-    gameResult.value = await invoke<GameResult>("get_damage_ranking");
-    cameFrom.value = "status";
-    page.value = "result";
-    startAutoDismissPoll();
-  } catch (e) {
-    errorMsg.value = String(e);
-  } finally {
-    loading.value = false;
-  }
-}
-
-// 结果页继续轮询游戏状态，新对局开始时自动返回
-async function startAutoDismissPoll() {
-  clearPoll();
-  const tick = async () => {
-    try {
-      const phase = await invoke<string>("get_gameflow_phase");
-      gamePhase.value = phase;
-      // 新对局开始 → 自动回到首页
-      const newGamePhases = ["ChampSelect", "ReadyCheck", "Matchmaking", "GameStart", "InProgress"];
-      if (newGamePhases.includes(phase)) {
-        goHome();
-        return;
-      }
-      pollTimer = setTimeout(tick, 3000);
-    } catch {
-      connStatus.value = "disconnected";
-      pollTimer = setTimeout(pollConnection, 5000);
-    }
-  };
-  pollTimer = setTimeout(tick, 3000);
-}
-
-async function loadHistory() {
-  page.value = "history";
-  historyLoading.value = true;
-  try {
-    matchList.value = await invoke<MatchSummary[]>("get_match_list", { count: 20 });
-  } catch (e) {
-    errorMsg.value = String(e);
-  } finally {
-    historyLoading.value = false;
-  }
-}
-
-async function viewGame(gameId: number) {
-  loading.value = true;
-  errorMsg.value = "";
-  try {
-    gameResult.value = await invoke<GameResult>("get_game_result", { gameId });
-    cameFrom.value = "history";
-    page.value = "result";
-    startAutoDismissPoll();
-  } catch (e) {
-    errorMsg.value = String(e);
-  } finally {
-    loading.value = false;
-  }
-}
-
-function goBack() {
-  if (page.value === "result" && cameFrom.value === "history") {
-    page.value = "history";
-  } else {
-    goHome();
-  }
-}
-
-function goHome() {
-  page.value = "status";
-  gameResult.value = null;
-  errorMsg.value = "";
-  connStatus.value === "connected" ? pollGamePhase() : pollConnection();
-}
-
-function openSettings() {
-  page.value = "settings";
-}
-
 // ────── 工具 ──────
 
 function fmt(n: number) { return Math.round(n).toLocaleString(); }
@@ -264,7 +108,7 @@ function fmtScore(s: number, label: string) {
 }
 function fmtTime(ts: number) {
   const d = new Date(ts), now = new Date();
-  const days = Math.floor((now.getTime() - d.getTime()) / 86400000);
+  const days = Math.round((new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()) / 86400000);
   const hh = d.getHours().toString().padStart(2, "0");
   const mm = d.getMinutes().toString().padStart(2, "0");
   if (days === 0) return `今天 ${hh}:${mm}`;
@@ -274,54 +118,48 @@ function fmtTime(ts: number) {
 }
 function phaseText(p: string) {
   return ({ None:"大厅", Lobby:"房间中", Matchmaking:"匹配中", ReadyCheck:"确认中",
-    ChampSelect:"选英雄中", InProgress:"游戏中", WaitingForStats:"结算中", EndOfGame:"对局结束" } as Record<string,string>)[p] || p;
+    ChampSelect:"选英雄中", GameStart:"正在进入游戏", InProgress:"游戏中", WaitingForStats:"结算中", EndOfGame:"对局结束" } as Record<string,string>)[p] || p;
 }
 function modeName(m: string) {
   return ({ ARAM:"大乱斗", KIWI:"大乱斗", CLASSIC:"匹配/排位", URF:"无限火力", CHERRY:"斗魂竞技场" } as Record<string,string>)[m] || m;
 }
 
 // ────── 结果分享图（截图到剪贴板） ──────
-const shareCopied = ref(false);
+const shareStatus = ref("");
 const sharing = ref(false);
 const resultArea = ref<HTMLElement>();
+let shareTimer: ReturnType<typeof setTimeout> | undefined;
+let updateTimer: ReturnType<typeof setTimeout> | undefined;
 
 async function shareAsImage() {
   if (!resultArea.value || sharing.value) return;
   sharing.value = true;
+  shareStatus.value = "";
+  clearTimeout(shareTimer);
   try {
     const canvas = await html2canvas(resultArea.value, {
-      backgroundColor: "#0A0E1A",
-      scale: 2, // 高清
-      logging: false,
+      backgroundColor: "#0A0E1A", scale: 2, logging: false,
     });
-    canvas.toBlob(async (blob) => {
-      if (!blob) {
-        sharing.value = false;
-        return;
-      }
-      try {
-        // 写到剪贴板（图片）
-        await navigator.clipboard.write([
-          new ClipboardItem({ [blob.type]: blob }),
-        ]);
-        shareCopied.value = true;
-        setTimeout(() => (shareCopied.value = false), 2500);
-      } catch {
-        // 浏览器不支持图片剪贴板 → 下载
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `红包局结算-${Date.now()}.png`;
-        a.click();
-        URL.revokeObjectURL(url);
-        shareCopied.value = true;
-        setTimeout(() => (shareCopied.value = false), 2500);
-      }
-      sharing.value = false;
-    }, "image/png");
-  } catch (e) {
-    console.warn("share failed:", e);
+    const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(
+      (blob) => blob ? resolve(blob) : reject(new Error("生成图片失败")), "image/png"
+    ));
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      shareStatus.value = "图片已复制，可粘贴到聊天";
+    } catch {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `红包局结算-${Date.now()}.png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      shareStatus.value = "已发起图片下载，请查看下载目录";
+    }
+  } catch {
+    shareStatus.value = "图片生成失败，请重试";
+  } finally {
     sharing.value = false;
+    shareTimer = setTimeout(() => { shareStatus.value = ""; }, 4000);
   }
 }
 
@@ -377,11 +215,16 @@ function dismissUpdate() {
 }
 
 onMounted(() => {
-  pollConnection();
+  void assistant.start();
+  getVersion().then((version) => { appVersion.value = version; }).catch(() => {});
   // 启动后 3 秒检查更新（避开开屏轮询争抢）
-  setTimeout(() => checkForUpdate(true), 3000);
+  updateTimer = setTimeout(() => checkForUpdate(true), 3000);
 });
-onUnmounted(() => clearPoll());
+onUnmounted(() => {
+  assistant.stop();
+  clearTimeout(updateTimer);
+  clearTimeout(shareTimer);
+});
 </script>
 
 <template>
@@ -426,10 +269,15 @@ onUnmounted(() => clearPoll());
           </svg>
         </div>
         <p class="title">LOL 红包局助手</p>
-        <p class="sub">等待客户端启动</p>
+        <p class="sub">等待连接英雄联盟</p>
+        <p class="connection-guide">打开并登录客户端后会自动连接。<br />请在选英雄前启动助手，以记录准确分队。</p>
         <div class="dots"><i /><i /><i /></div>
-        <button class="btn-s" style="margin-top:16px" @click="openSettings">设置</button>
-        <p v-if="errorMsg" class="err">{{ errorMsg }}</p>
+        <div class="row" style="margin-top:16px">
+          <button class="btn-s" @click="retryConnection" :disabled="connecting">{{ connecting ? "连接中…" : "重新连接" }}</button>
+          <button class="btn-s" @click="openSettings">设置</button>
+        </div>
+        <p class="connection-guide">仍未连接？尝试以管理员身份重新打开助手。</p>
+        <details v-if="connectionError" class="connection-details"><summary>连接详情 · 每 5 秒自动重试</summary><p>{{ connectionError }}</p></details>
       </div>
 
       <div v-else class="center-page">
@@ -443,12 +291,13 @@ onUnmounted(() => clearPoll());
         <p class="name">{{ summonerName }}</p>
         <p class="sub">{{ gamePhase ? phaseText(gamePhase) : "等待对局结束" }}</p>
         <p class="rule-tag">规则：{{ currentRule.name }}</p>
+        <p class="connection-guide">{{ gamePhase === "WaitingForStats" ? "正在等待客户端生成结算数据…" : "对局结束自动结算，可以关闭窗口收进托盘。" }}</p>
         <div class="dots"><i /><i /><i /></div>
         <div class="row" style="margin-top:20px">
           <button class="btn-s" @click="viewLastGame" :disabled="loading">
             {{ loading ? "加载中" : "上一局" }}
           </button>
-          <button class="btn-s" @click="loadHistory">历史</button>
+          <button class="btn-s" @click="loadHistory">历史对局</button>
           <button class="btn-s" @click="openSettings">设置</button>
         </div>
         <p v-if="errorMsg" class="err">{{ errorMsg }}</p>
@@ -457,7 +306,7 @@ onUnmounted(() => clearPoll());
 
     <!-- ====== 结果页 ====== -->
     <template v-else-if="page === 'result' && gameResult && ruleResult">
-      <div class="page">
+      <div class="page scrollable">
         <div class="nav">
           <button class="btn-back" @click="goBack">返回</button>
           <span class="nav-title">{{ currentRule.name }}</span>
@@ -469,10 +318,6 @@ onUnmounted(() => clearPoll());
         </div>
 
         <template v-else>
-          <p v-if="ruleResult.needsFloors && !gameResult.hasAccurateFloors" class="approx-tip">
-            ⚠ 历史对局，分队可能不准
-          </p>
-
           <!-- 4 人局：组队 / 个人战切换 -->
           <div v-if="show4pToggle" class="mode-toggle">
             <button
@@ -489,6 +334,9 @@ onUnmounted(() => clearPoll());
 
           <!-- 截图区域 -->
           <div ref="resultArea" class="share-area">
+            <p v-if="ruleResult.needsFloors && !gameResult.hasAccurateFloors" class="approx-tip">
+              未记录选英雄楼层，当前分队为推测结果。
+            </p>
             <div v-if="loserTeam" class="loser-box">
               <div class="loser-name">{{ loserTeam.players.map(p => p.summonerName).join("、") }}</div>
               <div class="loser-slogan">就是你了，发红包吧！</div>
@@ -501,17 +349,19 @@ onUnmounted(() => clearPoll());
               :class="{ lose: team.isLoser }"
             >
               <div class="team-top">
-                <span class="team-name">{{ team.name }}</span>
+                <span class="team-name" :title="team.name">{{ team.name }}</span>
                 <span class="team-pts">{{ fmtScore(team.score, ruleResult.scoreLabel) }} {{ ruleResult.scoreLabel }}</span>
               </div>
+              <div class="p-row p-head"><span class="p-name">玩家</span><span class="p-dmg">伤害</span><span class="p-tkn">承伤</span><span class="p-kda">K / D / A</span></div>
               <div v-for="p in team.players" :key="p.summonerName" class="p-row">
-                <span class="p-name">{{ p.summonerName }}</span>
+                <span class="p-name" :title="p.summonerName">{{ p.summonerName }}<b v-if="p.isMe" class="me-tag">我</b></span>
                 <span class="p-dmg">{{ fmt(p.damage) }}</span>
                 <span class="p-tkn">{{ fmt(p.damageTaken) }}</span>
                 <span class="p-kda">{{ p.kills }}/{{ p.deaths }}/{{ p.assists }}</span>
               </div>
             </div>
 
+            <p class="score-note">{{ currentRule.id === "classic" ? "综合分 = 伤害 + 承伤 ÷ 2；按分组汇总" : currentRule.description }}</p>
             <!-- 水印（截图时也带上） -->
             <div class="share-watermark">
               <span>{{ currentRule.name }}</span>
@@ -522,7 +372,7 @@ onUnmounted(() => clearPoll());
 
           <!-- 分享按钮（不在截图区域内） -->
           <button class="btn-share" @click="shareAsImage" :disabled="sharing">
-            <span v-if="shareCopied">已复制图片 ✓ 粘贴到微信群</span>
+            <span v-if="shareStatus" role="status">{{ shareStatus }}</span>
             <span v-else-if="sharing">生成中...</span>
             <span v-else>📸 复制截图到剪贴板</span>
           </button>
@@ -540,13 +390,16 @@ onUnmounted(() => clearPoll());
 
         <p v-if="historyLoading" class="sub" style="text-align:center;padding:24px">加载中...</p>
 
-        <div v-else class="h-list">
-          <div v-for="m in matchList" :key="m.gameId" class="h-item" @click="viewGame(m.gameId)">
+        <div v-else-if="errorMsg" class="empty-state" role="alert"><p>{{ errorMsg }}</p><button class="btn-s" @click="loadHistory">重新加载</button></div>
+        <div v-else-if="!matchList.length" class="empty-state"><p>还没有可显示的对局</p><p class="sub">完成一局游戏后，再来查看最近 20 局。</p><button class="btn-s" @click="loadHistory">刷新记录</button></div>
+        <div v-else class="h-list" :aria-busy="loading">
+          <p class="list-note" role="status">{{ loading ? "正在读取对局详情…" : "最近 20 局 · 点击查看结算" }}</p>
+          <button v-for="m in matchList" :key="m.gameId" class="h-item" @click="viewGame(m.gameId)" :disabled="loading">
             <span class="h-mode">{{ modeName(m.gameMode) }}</span>
             <span class="h-dur">{{ fmtDur(m.gameDuration) }}</span>
             <span class="h-time">{{ fmtTime(m.timestamp) }}</span>
             <span class="h-arrow">›</span>
-          </div>
+          </button>
         </div>
       </div>
     </template>
@@ -577,8 +430,10 @@ onUnmounted(() => clearPoll());
 
         <p class="section-label" style="margin-top:16px">关于</p>
         <div class="about-box">
-          <p class="about-line">LOL 红包局助手 v0.1.0</p>
-          <p class="about-line muted">连接本地 LCU API，自动结算对局</p>
+          <p class="about-line">LOL 红包局助手 <span v-if="appVersion">v{{ appVersion }}</span></p>
+          <p class="about-line muted">选英雄前启动，结算时自动显示结果</p>
+          <p class="about-line muted">关闭窗口后继续运行；托盘右键可退出。</p>
+          <p class="about-line muted">下载新版：daguagua.top</p>
         </div>
       </div>
     </template>
@@ -586,7 +441,6 @@ onUnmounted(() => clearPoll());
 </template>
 
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap');
 
 * { margin:0; padding:0; box-sizing:border-box; }
 
@@ -601,7 +455,7 @@ onUnmounted(() => clearPoll());
 
   --text:          #F1F5F9;
   --text-2:        #CBD5E1;
-  --muted:         #64748B;
+  --muted:         #94A3B8;
 
   --primary:       #7C3AED;
   --primary-hi:    #A78BFA;
@@ -611,8 +465,8 @@ onUnmounted(() => clearPoll());
   --danger:        #EF4444;
   --danger-glow:   rgba(239, 68, 68, 0.25);
 
-  --font-display:  'Chakra Petch', 'Segoe UI', sans-serif;
-  --font-body:     'Inter', 'Segoe UI Variable', 'Segoe UI', -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-display:  'Segoe UI', sans-serif;
+  --font-body:     'Segoe UI Variable', 'Segoe UI', -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
 }
 
 html, body {
@@ -624,9 +478,10 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* 隐藏所有滚动条（仍可滚动） */
-* { scrollbar-width: none; }
-*::-webkit-scrollbar { display: none; width: 0; height: 0; }
+* { scrollbar-width: thin; scrollbar-color: var(--border-light) transparent; }
+*::-webkit-scrollbar { width: 5px; height: 5px; }
+*::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 4px; }
+button:focus-visible, summary:focus-visible { outline: 2px solid var(--primary-hi); outline-offset: 3px; }
 
 body::before {
   content: '';
@@ -735,6 +590,7 @@ body::before {
 
 /* ────── 居中页面 ────── */
 .center-page {
+  min-height: 0; overflow-y: auto;
   flex: 1; display: flex; flex-direction: column;
   align-items: center; justify-content: center; text-align: center;
 }
@@ -817,7 +673,7 @@ body::before {
 .btn-s:active:not(:disabled) { transform: translateY(1px); }
 
 /* ────── 页面容器 ────── */
-.page { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.page { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .page.scrollable { overflow-y: auto; }
 
 /* ────── 导航 ────── */
@@ -946,9 +802,10 @@ body::before {
 }
 .team-name {
   font-family: var(--font-display);
-  font-weight: 600; font-size: 13px; flex: 1; letter-spacing: 0.3px;
+  font-weight: 600; font-size: 13px; flex: 1; min-width: 0; overflow-wrap: anywhere; margin-right: 8px; letter-spacing: 0.3px;
 }
 .team-pts {
+  flex-shrink: 0;
   font-family: var(--font-display);
   color: var(--primary-hi); font-weight: 700; font-size: 14px;
   font-variant-numeric: tabular-nums; letter-spacing: 0.5px;
@@ -971,6 +828,7 @@ body::before {
 .h-list { flex: 1; overflow-y: auto; }
 
 .h-item {
+  width: 100%; text-align: left; font-family: inherit;
   display: flex; align-items: center; gap: 10px;
   padding: 11px 14px;
   background: var(--surface);
@@ -1035,4 +893,18 @@ body::before {
 }
 .about-line { font-size: 12px; padding: 2px 0; color: var(--text-2); }
 .about-line.muted { color: var(--muted); }
+
+.connection-guide { color: var(--muted); font-size: 12px; line-height: 1.7; margin-top: 12px; }
+.connection-details { color: var(--muted); font-size: 11px; margin-top: 12px; max-width: 100%; text-align: left; }
+.connection-details summary { cursor: pointer; }
+.connection-details p { overflow-wrap: anywhere; margin-top: 6px; }
+.empty-state { display: grid; gap: 16px; justify-items: center; padding: 30px 12px; color: var(--text-2); line-height: 1.7; overflow-wrap: anywhere; text-align: center; }
+.list-note { font-size: 11px; color: var(--muted); margin-bottom: 12px; }
+.h-item:disabled { opacity: .5; cursor: wait; }
+.p-head span { color: var(--muted); font-weight: 400; font-size: 10px; }
+.me-tag { color: var(--primary-hi); font-size: 9px; margin-left: 4px; }
+.score-note { color: var(--muted); font-size: 10px; line-height: 1.6; margin-top: 12px; }
+.page.scrollable > * { flex-shrink: 0; }
+.page.scrollable .h-list { flex-shrink: 1; min-height: 0; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 </style>

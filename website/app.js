@@ -2,7 +2,6 @@
 (function detectPlatform() {
   const ua = navigator.userAgent;
   const isMobile = /Mobile|Android|iP(hone|od|ad)/i.test(ua);
-  const isWindows = /Windows/i.test(ua);
   const isMac = /Macintosh|Mac OS X/i.test(ua) && !isMobile;
   const isLinux = /Linux/i.test(ua) && !/Android/i.test(ua);
 
@@ -25,9 +24,10 @@
         try {
           await navigator.clipboard.writeText("https://daguagua.top");
           copyBtn.textContent = "已复制 ✓";
-          setTimeout(() => (copyBtn.textContent = "复制链接"), 2000);
+          setTimeout(() => (copyBtn.textContent = "复制官网地址"), 2000);
         } catch {
-          copyBtn.textContent = "复制失败";
+          document.getElementById("copy-link-fallback").hidden = false;
+          copyBtn.textContent = "长按地址复制";
         }
       });
     }
@@ -39,81 +39,6 @@
       note.textContent = `⚠ 检测到你使用 ${os}，本软件目前仅支持 Windows 10 / 11`;
     }
   }
-})();
-
-// ────── 事件追踪（钩子） ──────
-function trackEvent(name, props = {}) {
-  try {
-    // Microsoft Clarity 自定义事件
-    if (typeof window.clarity === "function") {
-      window.clarity("event", name);
-      // 额外上报属性作为标签（Clarity 支持）
-      for (const [k, v] of Object.entries(props)) {
-        if (v != null && v !== "") {
-          window.clarity("set", k, String(v));
-        }
-      }
-    }
-    // 预留通用钩子
-    if (typeof window.__track === "function") {
-      window.__track(name, props);
-    }
-    if (window.location.hostname === "localhost") {
-      console.log("[track]", name, props);
-    }
-  } catch (e) {}
-}
-
-function bindTracking() {
-  // 下载按钮点击
-  document.querySelectorAll("[data-track='download']").forEach((el) => {
-    el.addEventListener("click", () => {
-      trackEvent("download_click", {
-        source: el.dataset.source || "unknown",
-        url: el.getAttribute("href") || "",
-      });
-    });
-  });
-
-  // 导航/其他链接点击
-  document.querySelectorAll("[data-track='nav']").forEach((el) => {
-    el.addEventListener("click", () => {
-      trackEvent("nav_click", { target: el.dataset.source || el.textContent?.trim() });
-    });
-  });
-
-  // FAQ 展开
-  document.querySelectorAll(".faq-item").forEach((el) => {
-    el.addEventListener("toggle", () => {
-      if (el.open) {
-        trackEvent("faq_open", {
-          question: el.querySelector("summary span")?.textContent?.trim(),
-        });
-      }
-    });
-  });
-
-  // 页面浏览
-  trackEvent("page_view", { path: window.location.pathname });
-}
-
-document.addEventListener("DOMContentLoaded", bindTracking);
-
-// ────── 滚动触发动画（Intersection Observer） ──────
-(() => {
-  const io = new IntersectionObserver(
-    (entries) => {
-      for (const e of entries) {
-        if (e.isIntersecting) {
-          e.target.classList.add("visible");
-          io.unobserve(e.target);
-        }
-      }
-    },
-    { threshold: 0.15, rootMargin: "0px 0px -8% 0px" }
-  );
-
-  document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
 })();
 
 // ────── 从官网同域读取版本；安装包始终通过原生链接下载 ──────

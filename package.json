@@ -1,14 +1,14 @@
 {
   "name": "aram-helper",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "node --test 测试/官网下载.test.mjs 测试/下载构建.test.mjs",
+    "test": "node --experimental-strip-types --test 测试/官网下载.test.mjs 测试/下载构建.test.mjs 测试/页面轮询.test.mjs",
     "prepare:download": "node 脚本/准备官网下载.mjs"
   },
   "dependencies": {

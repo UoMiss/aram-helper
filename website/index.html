@@ -3,35 +3,25 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LOL 红包局助手 · 英雄联盟专用的红包局自动结算</title>
+  <title>LOL 红包局助手 · 打完一局，结算清楚</title>
   <meta name="description" content="《英雄联盟》红包局自动结算工具。对局结束自动弹出，告诉你谁该发红包。仅支持英雄联盟，其他游戏不可用。" />
   <meta property="og:title" content="LOL 红包局助手 · 英雄联盟专用" />
   <meta property="og:description" content="《英雄联盟》红包局，自动结算" />
   <link rel="icon" type="image/png" href="./icon.png" />
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./styles.css" />
-
-  <!-- Microsoft Clarity 数据分析 -->
-  <script type="text/javascript">
-    (function(c,l,a,r,i,t,y){
-        c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};
-        t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;
-        y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);
-    })(window, document, "clarity", "script", "waxxfg1lzn");
-  </script>
 </head>
 <body>
 
   <!-- 移动端访问提示（JS 控制显隐） -->
   <div id="mobile-banner" class="mobile-banner" style="display:none">
     <div class="mobile-banner-inner">
-      <span class="mobile-banner-text">💻 本软件仅支持 Windows 电脑，请用电脑打开</span>
-      <button id="copy-link-btn" class="mobile-banner-btn" data-track="nav" data-source="mobile_copy_link">复制链接</button>
+      <span class="mobile-banner-text">请在 Windows 电脑上安装使用</span>
+      <button id="copy-link-btn" class="mobile-banner-btn" data-track="nav" data-source="mobile_copy_link">复制官网地址</button>
     </div>
   </div>
 
+  <a class="skip-link" href="#top">跳到主要内容</a>
+  <p id="copy-link-fallback" hidden>可长按复制：<span>https://daguagua.top/</span></p>
   <!-- Nav -->
   <nav class="nav">
     <div class="nav-inner">
@@ -41,7 +31,7 @@
       </a>
       <div class="nav-links">
         <a href="#features">功能</a>
-        <a href="#how-to">使用</a>
+        <a href="#how-to">安装使用</a>
         <a href="#faq">常见问题</a>
         <a href="https://github.com/paidaxn/aram-helper" target="_blank" rel="noopener">GitHub</a>
       </div>
@@ -54,14 +44,14 @@
     <section class="hero">
       <div class="hero-bg"></div>
       <div class="hero-inner">
-        <p class="hero-eyebrow reveal">《英雄联盟》专用 · 其他游戏不支持</p>
+        <p class="hero-eyebrow reveal">为英雄联盟好友开黑而做</p>
         <h1 class="hero-title">
-          <span class="hero-line reveal">LOL 红包局</span>
-          <span class="hero-line hero-gradient reveal" style="--d: .12s">自动结算</span>
+          <span class="hero-line reveal">这一局，</span>
+          <span class="hero-line hero-gradient reveal" style="--d: .12s">谁来发红包？</span>
         </h1>
         <p class="hero-sub reveal" style="--d: .24s">
-          打完一局《英雄联盟》，结果自动弹出<br />
-          伤害、承伤、KDA，它全帮你算好
+          打完一局，结算清楚。<br />
+          自动读取伤害、承伤和 KDA，按约定的规则算分。
         </p>
 
         <div class="hero-cta reveal" style="--d: .36s">
@@ -70,12 +60,12 @@
             <span class="btn-arrow">↓</span>
           </a>
           <a href="#how-to" class="btn-ghost" data-track="nav" data-source="hero_how_to">
-            如何使用 <span class="btn-arrow-right">→</span>
+            安装指引 <span class="btn-arrow-right">→</span>
           </a>
         </div>
 
         <p class="hero-meta reveal" style="--d: .48s">
-          免费 · 开源 · <span id="download-size">3.1 MB</span> · <span id="version-label">最新版 v0.1.1</span>
+          Windows 10 / 11 · 64 位 · 免费开源<br /><span id="download-size">3.1 MB</span> · <span id="version-label">最新版 v0.1.1</span>
         </p>
         <p class="download-help reveal" style="--d: .5s">
           官网直连下载 · <a href="https://github.com/paidaxn/aram-helper/releases/download/v0.1.1/aram-helper_0.1.1_x64-setup.exe" id="backup-download" target="_blank" rel="noopener">GitHub 备用下载</a>
@@ -86,58 +76,32 @@
         </p>
       </div>
 
-      <div class="hero-scroll reveal" style="--d: .6s">
-        <span>向下滚动</span>
-        <div class="scroll-line"></div>
-      </div>
-    </section>
-
-    <!-- Product Showcase -->
-    <section class="showcase">
-      <div class="container">
-        <div class="showcase-grid">
-          <div class="showcase-text reveal">
-            <h2 class="showcase-title">零操作。</h2>
-            <p class="showcase-sub">
-              打开它，随时最小化到托盘。<br />
-              然后，照常打你的游戏。
-            </p>
+      <figure class="product-preview" aria-label="四人组队结算界面示例">
+        <div class="window-chrome"><span>LOL 红包局助手</span><span aria-hidden="true">− &nbsp; ×</span></div>
+        <div class="preview-content">
+          <div class="preview-heading"><strong>红包局经典</strong><span>大乱斗 · 22:36</span></div>
+          <div class="preview-mode"><span class="active">组队 2v2</span><span>个人战</span></div>
+          <div class="preview-loser"><span>本局最低分</span><strong>派大猩、小王</strong><span>就是你们了，发红包吧！</span></div>
+          <div class="preview-team lose"><div class="team-heading"><strong>派大猩、小王</strong><span>82,451 <small>综合分</small></span></div>
+            <table><thead><tr><th>玩家</th><th>伤害</th><th>承伤</th><th>K / D / A</th></tr></thead><tbody><tr><td>派大猩 <em>我</em></td><td>36,200</td><td>21,000</td><td>8/7/23</td></tr><tr><td>小王</td><td>19,200</td><td>33,102</td><td>5/8/31</td></tr></tbody></table>
           </div>
-          <div class="showcase-visual reveal" style="--d: .2s">
-            <div class="mock-window">
-              <div class="mock-header">
-                <span class="mock-dot"></span>
-                <span class="mock-dot"></span>
-                <span class="mock-dot"></span>
-              </div>
-              <div class="mock-body">
-                <div class="mock-title">红包局结算</div>
-                <div class="mock-loser">
-                  <div class="mock-loser-name">海绵派大猩</div>
-                  <div class="mock-loser-sub">就是你了，发红包吧</div>
-                </div>
-                <div class="mock-team lose">
-                  <span class="mock-team-name">派大猩、小王</span>
-                  <span class="mock-team-score">82,451</span>
-                </div>
-                <div class="mock-team">
-                  <span class="mock-team-name">老李、大黄</span>
-                  <span class="mock-team-score">98,203</span>
-                </div>
-              </div>
-            </div>
+          <div class="preview-team"><div class="team-heading"><strong>老李、大黄</strong><span>98,203 <small>综合分</small></span></div>
+            <table><thead><tr><th>玩家</th><th>伤害</th><th>承伤</th><th>K / D / A</th></tr></thead><tbody><tr><td>老李</td><td>42,300</td><td>20,000</td><td>14/6/19</td></tr><tr><td>大黄</td><td>28,900</td><td>34,006</td><td>6/9/30</td></tr></tbody></table>
           </div>
+          <p class="preview-formula">综合分 = 伤害 + 承伤 ÷ 2；按分组汇总</p>
+          <div class="preview-share">复制截图，和朋友分享结果</div>
         </div>
-      </div>
+        <figcaption>界面示意 · 示例数据</figcaption>
+      </figure>
     </section>
 
     <!-- Features -->
     <section id="features" class="features">
       <div class="container">
         <header class="section-header">
-          <h2 class="section-title reveal">该有的，都有</h2>
+          <h2 class="section-title reveal">小工具，把几件事做好。</h2>
           <p class="section-sub reveal" style="--d: .1s">
-            工具要轻，但该想到的一个都不少
+            专心打游戏，算分交给助手
           </p>
         </header>
 
@@ -145,7 +109,7 @@
           <article class="feat-card reveal">
             <div class="feat-icon">◎</div>
             <h3>自动到位</h3>
-            <p>开着就行。LCU 自动连接，对局结束自动弹窗，全程无需任何点击。</p>
+            <p>登录英雄联盟后自动连接，等待对局结束生成结算结果。关闭窗口后可继续在托盘运行。</p>
           </article>
 
           <article class="feat-card reveal" style="--d: .08s">
@@ -162,20 +126,20 @@
 
           <article class="feat-card reveal" style="--d: .24s">
             <div class="feat-icon">◉</div>
-            <h3>每局都在记</h3>
-            <p>最近 20 局完整保存。选英雄阶段的楼层数据精确记录，随时回看。</p>
+            <h3>随时回看</h3>
+            <p>从客户端读取最近 20 局。选英雄前启动助手，可记录这一局的楼层顺序。</p>
           </article>
 
           <article class="feat-card reveal" style="--d: .32s">
             <div class="feat-icon">◐</div>
-            <h3>只在本地</h3>
-            <p>数据本地处理，不联网、不上传。LCU 是腾讯默许的接口，不会封号。</p>
+            <h3>本地算分</h3>
+            <p>通过本机客户端接口读取数据，在本地计算和保存结算结果。检查新版本时会联网。</p>
           </article>
 
           <article class="feat-card reveal" style="--d: .40s">
             <div class="feat-icon">◇</div>
             <h3>轻如无物</h3>
-            <p>不到 10 MB。默认显示在屏幕右上角，可自由拖动，窗口自适应高度。</p>
+            <p>安装包约 3 MB。默认停在屏幕右上角，也可以自由拖动到顺手的位置。</p>
           </article>
         </div>
       </div>
@@ -185,31 +149,31 @@
     <section id="how-to" class="howto">
       <div class="container">
         <header class="section-header">
-          <h2 class="section-title reveal">三步开始</h2>
-          <p class="section-sub reveal" style="--d: .1s">从下载到第一次出结果，不超过两分钟</p>
+          <h2 class="section-title reveal">在选英雄前，打开它。</h2>
+          <p class="section-sub reveal" style="--d: .1s">提前启动，才能记录这一局的楼层顺序。</p>
         </header>
 
         <ol class="steps">
           <li class="step reveal">
             <div class="step-num">01</div>
             <div class="step-content">
-              <h3>下载</h3>
-              <p>点上面的按钮，拿到安装包。双击安装，按提示完成后打开。</p>
+              <h3>下载并安装</h3>
+              <p>下载 Windows 安装包，双击后按提示完成安装。升级前，请先在托盘菜单中退出旧版。</p>
             </div>
           </li>
           <li class="step reveal" style="--d: .1s">
             <div class="step-num">02</div>
             <div class="step-content">
-              <h3>以管理员身份运行</h3>
-              <p>右键图标 → 以管理员身份运行。首次会弹 UAC 权限提示，点"是"。</p>
-              <p class="step-note">读取 LOL 进程信息需要管理员权限，这是唯一的限制。</p>
+              <h3>确认「已连接」</h3>
+              <p>打开助手，登录英雄联盟客户端。若迟迟未连接，尝试以管理员身份重新打开助手。</p>
+              <p class="step-note">客户端更新或维护期间，可稍后点击「重新连接」。</p>
             </div>
           </li>
           <li class="step reveal" style="--d: .2s">
             <div class="step-num">03</div>
             <div class="step-content">
-              <h3>开始游戏</h3>
-              <p>打开英雄联盟客户端，窗口自动显示"已连接"。然后正常打游戏 —— 每局结束会自动跳出结算。</p>
+              <h3>选好规则，开始一局</h3>
+              <p>在设置里选好你们约定的规则，保持助手运行。点击窗口 × 会收进托盘；右键托盘图标选择「退出」才会结束运行。</p>
             </div>
           </li>
         </ol>
@@ -226,18 +190,18 @@
         <div class="faq-list">
           <details class="faq-item reveal">
             <summary>
-              <span>为什么需要管理员权限？</span>
+              <span>新版怎么升级？</span>
               <span class="faq-toggle"></span>
             </summary>
-            <p>因为英雄联盟客户端以管理员权限运行，只有同权限才能读取它的进程信息。这是与 LCU 交互的唯一前提。</p>
+            <p>先右键系统托盘中的助手图标，选择「退出」，再运行官网下载的新安装包。当前版本通过官网手动升级；已有算分规则设置会继续保留。</p>
           </details>
 
           <details class="faq-item reveal" style="--d: .06s">
             <summary>
-              <span>会被封号吗？</span>
+              <span>会修改游戏数据吗？</span>
               <span class="faq-toggle"></span>
             </summary>
-            <p>不会。LCU 是英雄联盟客户端本身暴露的本地接口，Rank-Analysis、WeGame 等都在用。我们只读取数据、不修改客户端、不干预游戏行为。</p>
+            <p>助手读取本机客户端的对局数据，不提供修改客户端或代打操作。项目为独立开源工具，与 Riot Games、腾讯没有官方关联；请以游戏官方的使用规则为准。</p>
           </details>
 
           <details class="faq-item reveal" style="--d: .12s">
@@ -245,7 +209,7 @@
               <span>支持哪些模式？</span>
               <span class="faq-toggle"></span>
             </summary>
-            <p>优先适配海克斯大乱斗（ARAM）。匹配、排位、无限火力、斗魂竞技场都可用，只要 LOL 能记录伤害数据。</p>
+            <p>主要面向英雄联盟大乱斗。其他 LOL 模式取决于客户端提供的数据和分组方式，结算时请核对参与玩家。</p>
           </details>
 
           <details class="faq-item reveal" style="--d: .18s">
@@ -253,7 +217,7 @@
               <span>历史对局的分队为什么可能不准？</span>
               <span class="faq-toggle"></span>
             </summary>
-            <p>"楼层"信息只在选英雄阶段可以捕获。安装本工具之前打过的历史对局没有这份数据，只能用默认顺序推测。装了之后打的每一局，分队都是准确的。</p>
+            <p>楼层顺序只在选英雄阶段可获取。助手未及时启动或未成功连接时，只能根据对局记录推测顺序。请在选英雄前启动，并确认显示「已连接」。</p>
           </details>
 
           <details class="faq-item reveal" style="--d: .24s">
@@ -261,7 +225,7 @@
               <span>能设置红包金额吗？</span>
               <span class="faq-toggle"></span>
             </summary>
-            <p>下个版本加。目前只判定"谁发"，金额你们自己商量。</p>
+            <p>目前只计算结果并显示最低分玩家或队伍，金额由朋友之间自行约定。软件不处理收款、付款或转账。</p>
           </details>
 
           <details class="faq-item reveal" style="--d: .30s">
@@ -269,15 +233,15 @@
               <span>Mac 或手机能用吗？</span>
               <span class="faq-toggle"></span>
             </summary>
-            <p>目前只有 Windows 版。英雄联盟客户端主要在 Windows 上，暂时没有其他平台计划。</p>
+            <p>当前提供 Windows 10 / 11 的 64 位安装包，手机和 macOS 暂不支持。</p>
           </details>
 
           <details class="faq-item reveal" style="--d: .36s">
             <summary>
-              <span>王者荣耀 / DOTA2 / 其他游戏能用吗？</span>
+              <span>下载慢或失败怎么办？</span>
               <span class="faq-toggle"></span>
             </summary>
-            <p><strong>不能。</strong>本工具通过《英雄联盟》客户端的 LCU 接口读取对局数据，只能用于英雄联盟。其他游戏没有这个接口，或接口完全不同，无法复用。如果你想要其他游戏的红包局工具，可能得自己开一个。</p>
+            <p>主按钮使用官网直连。若当前网络不稳定，可以重新下载，或使用上方 GitHub 备用入口。文件校验页提供 SHA-256，方便核对安装包完整性。</p>
           </details>
         </div>
       </div>
@@ -287,7 +251,7 @@
     <section class="close-cta">
       <div class="container">
         <div class="close-inner reveal">
-          <h2>下一局《英雄联盟》<br />就让它替你算。</h2>
+          <h2>少一点算分，<br />多一点开黑。</h2>
           <a class="btn-primary" href="./downloads/0.1.1/aram-helper_0.1.1_x64-setup.exe" download data-track="download" data-source="bottom_cta">
             下载 Windows 版
             <span class="btn-arrow">↓</span>

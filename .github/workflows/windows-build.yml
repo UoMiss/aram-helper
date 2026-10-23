@@ -17,7 +17,7 @@ jobs:
           cache: npm
       - name: 安装锁定依赖
         run: npm ci
-      - name: 下载入口回归测试
+      - name: 下载入口与页面轮询回归测试
         run: npm test
       - name: 前端类型检查与构建
         run: npm run build

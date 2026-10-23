@@ -62,6 +62,10 @@ impl LcuConnection {
         let auth = base64::engine::general_purpose::STANDARD.encode(format!("riot:{}", token));
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
+            // LCU 仅连接本机，避免系统代理影响；请求超时后交由前端重连。
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .timeout(std::time::Duration::from_secs(5))
             .build()?;
         Ok(Self { port, auth, client })
     }
@@ -174,7 +178,7 @@ impl LcuConnection {
             .map_err(|e| format!("lockfile: {}", e))?;
         let parts: Vec<&str> = content.trim().split(':').collect();
         if parts.len() >= 4 { Ok((parts[2].to_string(), parts[3].to_string())) }
-        else { Err(format!("lockfile 格式异常: {}", content).into()) }
+        else { Err("lockfile 格式异常".into()) }
     }
 
     // ────── API 调用 ──────

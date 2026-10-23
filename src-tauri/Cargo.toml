@@ -1,6 +1,6 @@
 [package]
 name = "aram-helper"
-version = "0.1.1"
+version = "0.1.2"
 description = "LOL 红包局助手 - 自动显示伤害排名"
 authors = ["paidaxn"]
 edition = "2021"
