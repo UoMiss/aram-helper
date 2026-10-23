@@ -1,4 +1,5 @@
 mod lcu;
+mod window_layout;
 
 use lcu::{GameResult, LcuConnection, MatchSummary};
 use std::collections::HashMap;
@@ -129,38 +130,33 @@ async fn get_game_result(game_id: i64, state: tauri::State<'_, AppState>) -> Res
     conn.get_game_result(game_id, &HashMap::new()).await.map_err(|e| e.to_string())
 }
 
-/// 动态调整窗口高度（宽度固定 420）
-#[tauri::command]
-async fn resize_window(window: tauri::Window, height: u32) -> Result<(), String> {
-    window
-        .set_size(tauri::Size::Logical(tauri::LogicalSize::new(420.0, height as f64)))
-        .map_err(|e| e.to_string())?;
-
-    // Windows 上保持贴右下角
-    #[cfg(target_os = "windows")]
-    {
-        let (_, _, work_right, work_bottom) = get_work_area();
-        let scale = window.scale_factor().unwrap_or(1.0);
-        let phys_w = (420.0 * scale) as i32;
-        let phys_h = (height as f64 * scale) as i32;
-        let x = work_right - phys_w - 12;
-        let y = work_bottom - phys_h - 12;
-        let _ = window.set_position(tauri::Position::Physical(
-            tauri::PhysicalPosition::new(x, y),
-        ));
-    }
-    Ok(())
+/// 默认贴右上角；切换页面时保留拖动位置，并限制在当前显示器工作区内。
+fn update_window_layout(window: &tauri::WebviewWindow, height: u32, initial: bool) -> tauri::Result<()> {
+    let monitor = window.current_monitor()?.or(window.primary_monitor()?);
+    let Some(monitor) = monitor else {
+        return window.set_size(tauri::LogicalSize::new(420.0, height.clamp(160, 820) as f64));
+    };
+    let area = monitor.work_area();
+    let scale = window.scale_factor()?;
+    let margin = (12.0 * scale).round() as u32;
+    let outer = window.outer_size()?;
+    let inner = window.inner_size()?;
+    let frame = (outer.width.saturating_sub(inner.width), outer.height.saturating_sub(inner.height));
+    let current = if initial { None } else { Some(window.outer_position()?) };
+    let desired = ((420.0 * scale).round() as u32, (height.clamp(160, 820) as f64 * scale).round() as u32);
+    let size = window_layout::inner_size(desired, (area.size.width, area.size.height), frame, margin);
+    window.set_size(tauri::PhysicalSize::new(size.0, size.1))?;
+    let outer = window.outer_size()?;
+    let (x, y) = window_layout::window_position(
+        (area.position.x, area.position.y), (area.size.width, area.size.height),
+        (outer.width, outer.height), current.map(|p| (p.x, p.y)), margin,
+    );
+    window.set_position(tauri::PhysicalPosition::new(x, y))
 }
 
-/// 获取 Windows 工作区域
-#[cfg(target_os = "windows")]
-fn get_work_area() -> (i32, i32, i32, i32) {
-    use windows_sys::Win32::Foundation::RECT;
-    use windows_sys::Win32::UI::WindowsAndMessaging::SystemParametersInfoW;
-    const SPI_GETWORKAREA: u32 = 0x0030;
-    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-    unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut rect as *mut _ as *mut _, 0); }
-    (rect.left, rect.top, rect.right, rect.bottom)
+#[tauri::command]
+async fn resize_window(window: tauri::WebviewWindow, height: u32) -> Result<(), String> {
+    update_window_layout(&window, height, false).map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -242,20 +238,10 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Windows: 窗口位置定到右下角
-            #[cfg(target_os = "windows")]
             if let Some(window) = app.get_webview_window("main") {
-                let (_, _, work_right, work_bottom) = get_work_area();
-                let win_w = 420;
-                let win_h = 420;
-                let x = work_right - win_w - 12;
-                let y = work_bottom - win_h - 12;
-                let _ = window.set_position(tauri::Position::Physical(
-                    tauri::PhysicalPosition::new(x, y),
-                ));
-                let _ = window.set_size(tauri::Size::Physical(
-                    tauri::PhysicalSize::new(win_w as u32, win_h as u32),
-                ));
+                if let Err(error) = update_window_layout(&window, 420, true) {
+                    eprintln!("初始化窗口位置失败：{error}");
+                }
             }
 
             Ok(())

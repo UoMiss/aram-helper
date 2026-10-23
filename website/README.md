@@ -1,87 +1,33 @@
 # LOL 红包局助手 · 官网
 
-静态网站，分享给朋友下载应用。
+官网使用现有 EdgeOne 项目和 daguagua.top 域名。下载按钮优先指向本站版本化文件，GitHub Releases 保留为备用。版本信息读取本站 release.json；即使清单暂不可用，HTML 中仍保留可用下载地址。
 
-## 国内可访问的部署方案（按推荐顺序）
+## 准备下载文件
 
-### 方案 1：Cloudflare Pages（推荐，免费）
-
-国内 80% 能直接访问，且免费不限流量。
-
-1. 访问 [pages.cloudflare.com](https://pages.cloudflare.com)，注册账号
-2. **Create a project** → **Connect to Git** → 授权 GitHub
-3. 选择 `aram-helper` 仓库
-4. 构建配置：
-   - **Framework preset**：None
-   - **Build command**：留空
-   - **Build output directory**：`website`
-5. Deploy，拿到 `xxx.pages.dev` 域名
-
-### 方案 2：腾讯云 EdgeOne Pages（国内最快，免费）
-
-专为国内优化，访问速度最快。
-
-1. 访问 [edgeone.cloud.tencent.com/pages](https://edgeone.cloud.tencent.com/pages)
-2. 登录腾讯云账号（微信/QQ 一键登录）
-3. 新建项目 → 导入 GitHub 仓库
-4. 项目根目录填 `website`，构建命令留空
-5. Deploy，拿到 `xxx.pages.tencentedge.com` 域名
-
-### 方案 3：Gitee Pages（简单，免费）
-
-1. 把代码推到 Gitee（你已有 `gitee.com/zhangshijieee/aram-helper`）
-2. 仓库 → 服务 → Gitee Pages
-3. 部署目录填 `website`，点启动
-4. 拿到 `zhangshijieee.gitee.io/aram-helper` 域名
-
-### 方案 4：阿里云 OSS 静态托管（最快，收费）
-
-- 月费几元
-- 需阿里云账号
-- 适合后期有稳定流量时考虑
-
-## 绑定自定义域名（可选）
-
-买个便宜域名（`.xyz`/`.top` 每年几块到几十块），在部署平台的 Domain 设置里绑定。
-
-推荐：
-- `aram.你的名字.xyz`
-- Cloudflare / 腾讯 DNSPod 免费解析
-
-## 关于 Binary 下载（重要）
-
-网站本身国内能访问了，但下载按钮指向 **GitHub Releases** —— 国内下载 GitHub 通常能通，但速度看运营商：
-
-- **教育网 / 电信**：一般能下，速度几百 KB/s
-- **移动网络**：可能较慢
-- **部分地区**：可能完全下不了
-
-**如果朋友反馈下载不了**，加一个 `ghproxy.cn` 镜像后备：
-
-```javascript
-// website/app.js 里，把下载链接改成:
-const proxied = `https://ghproxy.cn/${preferred.browser_download_url}`;
-```
-
-## 发版流程
-
-1. 在 Windows 上 `npm run tauri build` 生成安装包
-2. 打 tag：`git tag v0.1.1 && git push origin v0.1.1`
-3. GitHub → Releases → New release，选择 tag，上传 `.exe` / `.msi`
-4. **官网不需要重新部署** —— 每次刷新都会从 GitHub API 拉取最新版
-
-## 本地预览
+先取得 Windows 安装包及其原签名文件，再运行：
 
 ```bash
-cd website
-python3 -m http.server 8000
-# 浏览器打开 http://localhost:8000
+node 脚本/准备官网下载.mjs 安装包.exe 安装包.exe.sig 0.1.1 2026-10-23T14:00:00Z https://github.com/paidaxn/aram-helper/releases/download/v0.1.1/aram-helper_0.1.1_x64-setup.exe
 ```
 
-## 文件说明
+脚本生成 website/downloads/版本/、SHA256SUMS.txt、release.json 和 latest.json，并同步静态按钮。不要覆盖已经发布的同版本文件；使用新版本号。
 
-- `index.html` — 主页
-- `styles.css` — 样式（电竞紫金主题）
-- `app.js` — 动态从 GitHub API 获取最新版本
-- `icon.png` — 应用图标
-- `vercel.json` — Vercel 部署配置（备用）
+原更新签名私钥不可用时，将第二个参数写为 `-`，只准备手动下载安装包，并保留之前有效的 latest.json。不得更换现有公钥或向旧版推送无签名更新。
+
+## EdgeOne 构建
+
+现有项目从 GitHub 的 master 分支自动部署，根目录为 website。edgeone.json 已配置构建命令 `node ../脚本/构建官网.mjs`、输出目录 `.` 和 Node.js 22.11.0，可随代码一起部署。
+
+构建脚本在服务器端取得 release.json 指定的 GitHub 文件，严格核对大小及 SHA-256，再将安装包作为本站静态资源部署。客户端不需要访问 GitHub API。二进制目录不进入 Git，后续部署可重复生成。
+
+直接上传时，先在本地运行构建脚本，再将完整 website 目录打包上传。edgeone.json 为版本清单设置及时刷新，为版本化文件设置长期缓存。
+
+## 验收
+
+- 两个下载按钮、版本、大小、SHA-256 一致。
+- 完整下载文件与清单摘要一致，Range 请求可恢复下载。
+- 同一网络对比 GitHub 与官网地址的首字节、总耗时和速度；一次测速不代表所有运营商。
+- 本站失败时可使用 GitHub 备用入口。
+- 自动更新需保留原签名体系，清单与安装包先验证再发布。
+
+当前官网加速区在控制台显示为全球可用区（不含中国大陆）。是否调整区域需结合真实测速、域名要求和实际套餐另行核对。

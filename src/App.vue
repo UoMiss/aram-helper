@@ -64,9 +64,10 @@ const updateProgress = ref(0);
 const appRoot = ref<HTMLElement>();
 
 function computeTargetHeight(): number {
-  if (page.value === "status") return 420;
-  if (page.value === "history") return 580;
-  if (page.value === "settings") return 540;
+  const updateHeight = updateState.value !== "idle" ? 48 : 0;
+  if (page.value === "status") return 420 + updateHeight;
+  if (page.value === "history") return 580 + updateHeight;
+  if (page.value === "settings") return 540 + updateHeight;
 
   if (page.value === "result" && ruleResult.value) {
     const r = ruleResult.value;
@@ -294,7 +295,10 @@ async function shareAsImage() {
       logging: false,
     });
     canvas.toBlob(async (blob) => {
-      if (!blob) return;
+      if (!blob) {
+        sharing.value = false;
+        return;
+      }
       try {
         // 写到剪贴板（图片）
         await navigator.clipboard.write([

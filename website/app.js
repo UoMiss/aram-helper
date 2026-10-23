@@ -116,36 +116,37 @@ document.addEventListener("DOMContentLoaded", bindTracking);
   document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
 })();
 
-// ────── 从 GitHub API 拉取最新 release ──────
-const GITHUB_OWNER = "paidaxn";
-const GITHUB_REPO = "aram-helper";
-
+// ────── 从官网同域读取版本；安装包始终通过原生链接下载 ──────
 (async function loadLatestRelease() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
   try {
-    const res = await fetch(
-      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`
-    );
-    if (!res.ok) return;
+    const res = await fetch("./release.json", { signal: controller.signal, cache: "no-cache" });
+    if (!res.ok) throw new Error(`版本清单返回 ${res.status}`);
     const data = await res.json();
-
-    const tag = (data.tag_name || "").replace(/^v/, "");
-    if (tag) {
-      const label = document.getElementById("version-label");
-      if (label) label.textContent = `最新版 v${tag}`;
+    if (!/^\d+\.\d+\.\d+$/.test(data.version || "") || !Number.isSafeInteger(data.size) || data.size <= 0 || !/^[a-f0-9]{64}$/.test(data.sha256 || "")) {
+      throw new Error("版本清单格式无效");
     }
-
-    const assets = data.assets || [];
-    const preferred =
-      assets.find((a) => /setup.*\.exe$/i.test(a.name)) ||
-      assets.find((a) => /\.msi$/i.test(a.name)) ||
-      assets.find((a) => /\.exe$/i.test(a.name));
-
-    if (preferred) {
-      document.querySelectorAll("[data-track='download']").forEach((btn) => {
-        btn.setAttribute("href", preferred.browser_download_url);
-      });
+    const url = new URL(data.url, window.location.href);
+    const expectedPath = new URL(`./downloads/${data.version}/aram-helper_${data.version}_x64-setup.exe`, window.location.href).pathname;
+    if (url.origin !== window.location.origin || url.pathname !== expectedPath || url.search || url.hash) {
+      throw new Error("下载地址与版本不一致");
     }
-  } catch (e) {
-    console.warn("Failed to fetch release:", e);
+    document.querySelectorAll("[data-track='download']").forEach((btn) => btn.setAttribute("href", url.href));
+    const label = document.getElementById("version-label");
+    if (label) label.textContent = `最新版 v${data.version}`;
+    const size = document.getElementById("download-size");
+    if (size) size.textContent = `${(data.size / 1024 / 1024).toFixed(1)} MB`;
+    const checksum = document.getElementById("checksum-link");
+    if (checksum) checksum.setAttribute("href", new URL("SHA256SUMS.txt", url).href);
+    const backup = new URL(data.backupUrl);
+    if (backup.origin === "https://github.com" && backup.pathname.startsWith(`/paidaxn/aram-helper/releases/download/v${data.version}/`)) {
+      document.getElementById("backup-download")?.setAttribute("href", backup.href);
+    }
+  } catch (error) {
+    // HTML 已内置可用下载地址，清单异常时继续使用该版本。
+    console.warn("版本清单暂不可用：", error);
+  } finally {
+    clearTimeout(timeout);
   }
 })();
