@@ -75,3 +75,48 @@
     clearTimeout(timeout);
   }
 })();
+
+// ────── 官网访问与下载点击统计 ──────
+(function bindAnalytics() {
+  function trackEvent(name, props = {}) {
+    try {
+      if (typeof window.clarity !== "function") return;
+      for (const [key, value] of Object.entries(props)) {
+        if (value != null && value !== "") window.clarity("set", key, String(value));
+      }
+      window.clarity("event", name);
+    } catch {
+      // 统计被拦截或发生异常时，继续使用原生下载与页面交互。
+    }
+  }
+
+  function bindTracking() {
+    document.querySelectorAll("[data-track='download'], [data-track='download-backup']").forEach((el) => {
+      el.addEventListener("click", () => {
+        const source = el.dataset.source || "unknown";
+        trackEvent("download_click", { source });
+        // 分入口事件可直接在后台查看；总下载点击统一看 download_click。
+        if (["hero", "bottom_cta", "github_backup"].includes(source)) {
+          trackEvent(`download_${source}`);
+        }
+      });
+    });
+    document.querySelectorAll("[data-track='nav']").forEach((el) => {
+      el.addEventListener("click", () => {
+        trackEvent("nav_click", { target: el.dataset.source || el.textContent?.trim() });
+      });
+    });
+    document.querySelectorAll(".faq-item").forEach((el) => {
+      el.addEventListener("toggle", () => {
+        if (el.open) trackEvent("faq_open", { question: el.querySelector("summary span")?.textContent?.trim() });
+      });
+    });
+    trackEvent("page_view", { path: window.location.pathname });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bindTracking, { once: true });
+  } else {
+    bindTracking();
+  }
+})();

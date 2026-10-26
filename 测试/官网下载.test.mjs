@@ -58,3 +58,91 @@ for (const [name, fetcher] of [
     assert.equal(state.requests.length, 1);
   });
 }
+
+const html = await readFile(new URL("../website/index.html", import.meta.url), "utf8");
+
+function analyticsPage(clarity, readyState = "complete") {
+  const readyListeners = [];
+  const links = [...html.matchAll(/<a\b[^>]*data-track="download(?:-backup)?"[^>]*>/g)].map(([tag]) => {
+    const listeners = new Map();
+    return {
+      href: tag.match(/href="([^"]+)"/)[1],
+      dataset: { source: tag.match(/data-source="([^"]+)"/)[1] },
+      addEventListener(name, listener) { listeners.set(name, listener); },
+      click() {
+        const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+        listeners.get("click")?.(event);
+        return event;
+      },
+    };
+  });
+  vm.runInNewContext(source, {
+    navigator: { userAgent: "Windows" }, URL, AbortController,
+    window: { clarity, location: { href: "https://daguagua.top/", origin: "https://daguagua.top", pathname: "/" } },
+    document: {
+      readyState, getElementById: () => null,
+      addEventListener(name, listener, options) { readyListeners.push({ name, listener, options }); },
+      querySelectorAll: (query) => query === "[data-track='download'], [data-track='download-backup']" ? links : [],
+    },
+    fetch: async () => { throw new Error("offline"); },
+    setTimeout: () => 1, clearTimeout() {}, console: { warn() {} },
+  });
+  return { links, readyListeners };
+}
+
+test("Clarity 沿用原项目并异步加载，加载前可排队保存事件", () => {
+  const bootstrap = html.match(/<script type="text\/javascript">([\s\S]*?)<\/script>/)[1];
+  const scripts = [];
+  const window = {};
+  vm.runInNewContext(bootstrap, {
+    window,
+    document: {
+      createElement: () => ({}),
+      getElementsByTagName: () => [{ parentNode: { insertBefore(script) { scripts.push(script); } } }],
+    },
+  });
+  assert.equal(scripts.length, 1);
+  assert.equal(scripts[0].src, "https://www.clarity.ms/tag/waxxfg1lzn");
+  assert.ok(scripts[0].async);
+  window.clarity("event", "download_click");
+  assert.deepEqual(Array.from(window.clarity.q[0]), ["event", "download_click"]);
+});
+
+test("访问只绑定一次；首屏、页尾和备用入口各上报一次总下载事件", () => {
+  const calls = [];
+  const page = analyticsPage((...args) => calls.push(args), "loading");
+  assert.equal(calls.length, 0);
+  assert.equal(page.readyListeners.length, 1);
+  assert.equal(page.readyListeners[0].name, "DOMContentLoaded");
+  assert.equal(page.readyListeners[0].options.once, true);
+  page.readyListeners[0].listener();
+  assert.equal(calls.filter(([command, name]) => command === "event" && name === "page_view").length, 1);
+  assert.deepEqual(page.links.map((link) => link.dataset.source), ["hero", "github_backup", "bottom_cta"]);
+  for (const link of page.links) {
+    calls.length = 0;
+    const href = link.href;
+    assert.equal(link.click().defaultPrevented, false);
+    assert.equal(link.href, href);
+    assert.deepEqual(calls, [
+      ["set", "source", link.dataset.source],
+      ["event", "download_click"],
+      ["event", `download_${link.dataset.source}`],
+    ]);
+  }
+});
+
+for (const [name, clarity] of [
+  ["统计脚本被拦截", undefined],
+  ["统计接口异常", () => { throw new Error("analytics unavailable"); }],
+]) {
+  test(`${name}时三个入口均保持原生下载`, () => {
+    const { links } = analyticsPage(clarity);
+    assert.equal(links.length, 3);
+    for (const link of links) {
+      const href = link.href;
+      assert.equal(link.click().defaultPrevented, false);
+      assert.equal(link.href, href);
+      assert.match(href, /aram-helper_0\.1\.2_x64-setup\.exe$/);
+    }
+  });
+}

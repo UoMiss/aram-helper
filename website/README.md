@@ -32,4 +32,17 @@ node 脚本/准备官网下载.mjs 安装包.exe 安装包.exe.sig 0.1.1 2026-10
 
 当前官网加速区在控制台显示为全球可用区（不含中国大陆）。是否调整区域需结合真实测速、域名要求和实际套餐另行核对。
 
-页面使用系统字体和静态 HTML；禁用 JavaScript 时下载入口仍可见。官网已移除 Clarity 及访客事件上报，后续恢复分析需单独明确数据与接收方。
+页面使用系统字体和静态 HTML；禁用 JavaScript 时下载入口仍可见。
+
+## 访问与下载统计
+
+2026-10-26 按项目所有者要求恢复原 Microsoft Clarity 项目 `waxxfg1lzn`。官网访问和交互数据发送至 Microsoft Clarity；统计脚本异步加载，统计失败不会等待、取消或替换原生下载链接。
+
+后台：https://clarity.microsoft.com/projects/view/waxxfg1lzn/dashboard（使用原来有此项目权限的账号登录）。
+
+- 访问情况：Dashboard 的用户数、会话和页面浏览数据。
+- 下载情况：Smart events 中的 `download_click`，沿用原事件名。可筛选触发下载的会话或访客。
+- 下载入口：`download_hero` 为首屏，`download_bottom_cta` 为页尾，`download_github_backup` 为 GitHub 备用入口；`source` 自定义标签也保留。分入口事件与总事件同时上报，汇总时只使用 `download_click`，不要将两者相加。
+- 原有 `page_view`、`nav_click`、`faq_open` 事件继续保留。
+
+下载统计代表点击下载或触发下载的会话，不代表安装包完整下载成功，也不代表安装人数。浏览器拦截统计脚本时会缺失该次数据；停用统计期间的访问不会由恢复脚本自动补回。
