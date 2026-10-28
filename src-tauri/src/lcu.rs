@@ -14,10 +14,12 @@ pub struct LcuConnection {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerData {
-    #[serde(default)]
-    pub participant_id: i64,
     pub summoner_name: String,
+    #[serde(default)]
+    pub puuid: String,
     pub champion_id: i64,
+    #[serde(default)]
+    pub win: Option<bool>,
     #[serde(default)]
     pub team_id: Option<i64>,
     pub damage: i64,
@@ -28,8 +30,6 @@ pub struct PlayerData {
     pub assists: i64,
     pub is_friend: bool,
     pub is_me: bool,
-    #[serde(default)]
-    pub is_history_owner: bool,
 }
 
 /// 对局原始数据（由前端选择参与者和分组）
@@ -39,26 +39,33 @@ pub struct GameResult {
     pub game_id: i64,
     pub game_mode: String,
     #[serde(default)]
+    pub queue_id: Option<i64>,
+    #[serde(default)]
     pub is_custom_game: Option<bool>,
     pub game_duration: i64,
     pub timestamp: i64,
     pub players: Vec<PlayerData>, // 双方玩家；前端根据模式分组
-    #[serde(default)]
-    pub history_owner_puuid: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct FriendSummary {
-    pub puuid: String,
-    pub display_name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchSummary {
+    #[serde(default)]
+    pub kills: Option<i64>,
+    #[serde(default)]
+    pub deaths: Option<i64>,
+    #[serde(default)]
+    pub assists: Option<i64>,
+    #[serde(default)]
+    pub end_timestamp: Option<i64>,
+    #[serde(default)]
+    pub win: Option<bool>,
     pub game_id: i64,
     pub game_mode: String,
+    #[serde(default)]
+    pub queue_id: Option<i64>,
+    #[serde(default)]
+    pub is_custom_game: Option<bool>,
     pub game_duration: i64,
     pub timestamp: i64,
     pub champion_id: i64,
@@ -69,6 +76,21 @@ pub struct MatchSummary {
 pub struct ActiveGame {
     pub game_id: i64,
     pub phase: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LobbyMember {
+    pub puuid: String,
+    pub summoner_name: String,
+    pub is_me: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LobbyParticipants {
+    pub is_custom_game: bool,
+    pub members: Vec<LobbyMember>,
 }
 
 // ────── LCU 连接 ──────
@@ -258,37 +280,48 @@ impl LcuConnection {
         Ok(Some(ActiveGame { game_id, phase: phase.to_string() }))
     }
 
-    /// 好友选择使用完整列表；读取失败必须显式报错，不能伪装为空名单。
-    pub async fn get_friends(&self) -> Result<Vec<FriendSummary>, Box<dyn std::error::Error + Send + Sync>> {
-        let data = self.api("/lol-chat/v1/friends").await?;
-        let items = data.as_array().ok_or("好友列表格式不完整")?;
+    /// 仅返回当前房间中的自己和好友；自定义从双方队列取人，排除观战与电脑。
+    pub async fn get_lobby_participants(&self) -> Result<LobbyParticipants, Box<dyn std::error::Error + Send + Sync>> {
+        let lobby = self.api("/lol-lobby/v2/lobby").await?;
+        let me = self.api("/lol-summoner/v1/current-summoner").await?;
+        let my_puuid = me["puuid"].as_str().filter(|v| !v.is_empty()).ok_or("无法确认当前账号")?;
+        let my_id = me["summonerId"].as_i64().filter(|id| *id > 0);
+        // 好友接口失败不能当作没有好友，否则会少算参与人数。
+        let friends = self.api("/lol-chat/v1/friends").await?;
+        let friends = friends.as_array().ok_or("好友列表尚未就绪")?;
+        let is_custom_game = lobby["gameConfig"]["isCustom"].as_bool().ok_or("房间类型尚未就绪")?;
+        let members: Vec<&serde_json::Value> = if is_custom_game {
+            let blue = lobby["gameConfig"]["customTeam100"].as_array().ok_or("蓝方名单尚未就绪")?;
+            let red = lobby["gameConfig"]["customTeam200"].as_array().ok_or("红方名单尚未就绪")?;
+            blue.iter().chain(red.iter()).collect()
+        } else {
+            lobby["members"].as_array().ok_or("房间名单尚未就绪")?.iter().collect()
+        };
+        let mut selected = Vec::new();
         let mut seen = HashSet::new();
-        let mut friends = Vec::new();
-        for item in items {
-            let Some(puuid) = item["puuid"].as_str().filter(|id| !id.is_empty()) else { continue; };
-            if !seen.insert(puuid.to_string()) { continue; }
-            let name = item["gameName"].as_str().filter(|name| !name.is_empty())
-                .or_else(|| item["name"].as_str().filter(|name| !name.is_empty())).unwrap_or("未命名好友");
-            let tag = item["gameTag"].as_str().filter(|tag| !tag.is_empty());
-            friends.push(FriendSummary { puuid: puuid.to_string(),
-                display_name: tag.map(|tag| format!("{}#{}", name, tag)).unwrap_or_else(|| name.to_string()) });
+        for member in members {
+            if member["isBot"].as_bool() == Some(true) { continue; }
+            let puuid = member["puuid"].as_str().filter(|v| !v.is_empty());
+            let id = member["summonerId"].as_i64().filter(|v| *v > 0);
+            if puuid.is_none() && id.is_none() { return Err("房间成员身份尚未就绪".into()); }
+            let is_me = puuid == Some(my_puuid) || (id.is_some() && id == my_id);
+            let friend = friends.iter().find(|f| {
+                (puuid.is_some() && f["puuid"].as_str() == puuid)
+                    || (id.is_some() && f["summonerId"].as_i64() == id)
+            });
+            if !is_me && friend.is_none() { continue; }
+            let selected_puuid = if is_me { Some(my_puuid) } else {
+                puuid.or_else(|| friend.and_then(|f| f["puuid"].as_str()).filter(|v| !v.is_empty()))
+            }.ok_or("好友身份尚未就绪")?;
+            if !seen.insert(selected_puuid.to_string()) { continue; }
+            let name = member["gameName"].as_str().filter(|v| !v.is_empty())
+                .or_else(|| member["summonerName"].as_str())
+                .or_else(|| friend.and_then(|f| f["name"].as_str()))
+                .unwrap_or("未知玩家");
+            selected.push(LobbyMember { puuid: selected_puuid.to_string(), summoner_name: name.to_string(), is_me });
         }
-        friends.sort_by(|a, b| a.display_name.cmp(&b.display_name).then(a.puuid.cmp(&b.puuid)));
-        Ok(friends)
-    }
-
-    async fn checked_friend_ids(&self, puuid: &str) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
-        if puuid.is_empty() || puuid.len() > 128 || !puuid.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
-            return Err("好友标识无效，请刷新好友列表".into());
-        }
-        let ids: HashSet<String> = self.get_friends().await?.into_iter().map(|friend| friend.puuid).collect();
-        if !ids.contains(puuid) { return Err("该玩家已不在好友列表，请刷新后重选".into()); }
-        Ok(ids)
-    }
-
-    pub async fn get_friend_match_list(&self, puuid: &str, count: usize) -> Result<Vec<MatchSummary>, Box<dyn std::error::Error + Send + Sync>> {
-        self.checked_friend_ids(puuid).await?;
-        self.read_match_list(puuid, count).await
+        if !selected.iter().any(|m| m.is_me) { return Err("当前账号未在参赛队伍中（可能正在观战）".into()); }
+        Ok(LobbyParticipants { is_custom_game, members: selected })
     }
 
     async fn get_friend_puuids(&self) -> HashSet<String> {
@@ -306,10 +339,6 @@ impl LcuConnection {
         let summoner = self.api("/lol-summoner/v1/current-summoner").await?;
         let puuid = summoner["puuid"].as_str().ok_or("无法获取 PUUID")?;
 
-        self.read_match_list(puuid, count).await
-    }
-
-    async fn read_match_list(&self, puuid: &str, count: usize) -> Result<Vec<MatchSummary>, Box<dyn std::error::Error + Send + Sync>> {
         let history = self.api(
             &format!("/lol-match-history/v1/products/lol/{}/matches?begIndex=0&endIndex={}", puuid, count)
         ).await?;
@@ -318,37 +347,33 @@ impl LcuConnection {
 
         let mut list = Vec::new();
         for game in games {
-            // 找到当前玩家使用的英雄
-            let my_champion = Self::find_my_champion(game, puuid);
+            // 按当前账号身份匹配参赛者，避免读取其他玩家的战绩。
+            let me = Self::find_my_participant(game, puuid);
             list.push(MatchSummary {
+                end_timestamp: game["gameEndTimestamp"].as_i64().filter(|ts| *ts > 0),
+                win: me.and_then(|p| p["stats"]["win"].as_bool()),
+                kills: me.and_then(|p| p["stats"]["kills"].as_i64()).filter(|v| *v >= 0),
+                deaths: me.and_then(|p| p["stats"]["deaths"].as_i64()).filter(|v| *v >= 0),
+                assists: me.and_then(|p| p["stats"]["assists"].as_i64()).filter(|v| *v >= 0),
                 game_id: game["gameId"].as_i64().unwrap_or(0),
                 game_mode: game["gameMode"].as_str().unwrap_or("").to_string(),
+                queue_id: game["queueId"].as_i64().filter(|id| *id >= 0),
+                is_custom_game: self.resolve_result_game_type(game).await,
                 game_duration: game["gameDuration"].as_i64().unwrap_or(0),
                 timestamp: game["gameCreation"].as_i64().unwrap_or(0),
-                champion_id: my_champion,
+                champion_id: me.and_then(|p| p["championId"].as_i64()).unwrap_or(0),
             });
         }
 
         Ok(list)
     }
 
-    fn find_my_champion(game: &serde_json::Value, puuid: &str) -> i64 {
-        let identities = game["participantIdentities"].as_array();
-        let participants = game["participants"].as_array();
-
-        if let (Some(ids), Some(parts)) = (identities, participants) {
-            for id in ids {
-                if id["player"]["puuid"].as_str() == Some(puuid) {
-                    let pid = id["participantId"].as_i64().unwrap_or(0);
-                    for p in parts {
-                        if p["participantId"].as_i64() == Some(pid) {
-                            return p["championId"].as_i64().unwrap_or(0);
-                        }
-                    }
-                }
-            }
-        }
-        0
+    fn find_my_participant<'a>(game: &'a serde_json::Value, puuid: &str) -> Option<&'a serde_json::Value> {
+        let identity = game["participantIdentities"].as_array()?.iter()
+            .find(|id| id["player"]["puuid"].as_str() == Some(puuid))?;
+        let participant_id = identity["participantId"].as_i64()?;
+        game["participants"].as_array()?.iter()
+            .find(|p| p["participantId"].as_i64() == Some(participant_id))
     }
 
     /// 获取指定对局的双方玩家原始数据
@@ -357,17 +382,7 @@ impl LcuConnection {
         let my_puuid = summoner["puuid"].as_str().ok_or("无法获取 PUUID")?.to_string();
 
         let friend_puuids = self.get_friend_puuids().await;
-        self.read_game_result(game_id, &my_puuid, None, &friend_puuids).await
-    }
 
-    pub async fn get_friend_game_result(&self, game_id: i64, puuid: &str) -> Result<GameResult, Box<dyn std::error::Error + Send + Sync>> {
-        let friend_puuids = self.checked_friend_ids(puuid).await?;
-        let summoner = self.api("/lol-summoner/v1/current-summoner").await?;
-        let my_puuid = summoner["puuid"].as_str().ok_or("无法获取当前玩家 PUUID")?;
-        self.read_game_result(game_id, my_puuid, Some(puuid), &friend_puuids).await
-    }
-
-    async fn read_game_result(&self, game_id: i64, my_puuid: &str, history_owner: Option<&str>, friend_puuids: &HashSet<String>) -> Result<GameResult, Box<dyn std::error::Error + Send + Sync>> {
         let details = self.api(&format!("/lol-match-history/v1/games/{}", game_id)).await?;
 
         if details["gameId"].as_i64() != Some(game_id) {
@@ -396,25 +411,25 @@ impl LcuConnection {
         }
 
         // 保存双方玩家与阵营，让分组模式独立选择参与者。
-        let required_player = history_owner.unwrap_or(my_puuid);
-        if !puuid_map.values().any(|v| v == required_player) {
-            return Err("对局中未找到所选玩家，请重新读取战绩".into());
+        if !puuid_map.values().any(|v| v == &my_puuid) {
+            return Err("无法找到当前玩家".into());
         }
         let mut team: Vec<&serde_json::Value> = participants.iter().collect();
         team.sort_by_key(|p| p["participantId"].as_i64().unwrap_or(0));
 
-        let players: Result<Vec<PlayerData>, &'static str> = team.iter().map(|p| {
+        let players: Vec<PlayerData> = team.iter().map(|p| {
             let pid = p["participantId"].as_i64().unwrap_or(0);
             let player_puuid = puuid_map.get(&pid).cloned().unwrap_or_default();
             let champion_id = p["championId"].as_i64().unwrap_or(0);
             let is_me = player_puuid == my_puuid;
 
-            Ok(PlayerData {
-                participant_id: pid,
+            PlayerData {
                 summoner_name: name_map.get(&pid).cloned().unwrap_or("未知".to_string()),
+                puuid: player_puuid.clone(),
                 champion_id,
+                win: p["stats"]["win"].as_bool(),
                 team_id: p["teamId"].as_i64(),
-                damage: p["stats"]["totalDamageDealtToChampions"].as_i64().filter(|value| *value >= 0).ok_or("对英雄伤害数据不完整，请稍后重新读取")?,
+                damage: p["stats"]["totalDamageDealtToChampions"].as_i64().unwrap_or(0),
                 damage_taken: p["stats"]["totalDamageTaken"].as_i64().unwrap_or(0),
                 gold_earned: p["stats"]["goldEarned"].as_i64().unwrap_or(0),
                 kills: p["stats"]["kills"].as_i64().unwrap_or(0),
@@ -422,18 +437,17 @@ impl LcuConnection {
                 assists: p["stats"]["assists"].as_i64().unwrap_or(0),
                 is_friend: is_me || friend_puuids.contains(&player_puuid),
                 is_me,
-                is_history_owner: history_owner == Some(player_puuid.as_str()),
-            })
+            }
         }).collect();
 
         Ok(GameResult {
             game_id,
             game_mode,
+            queue_id: details["queueId"].as_i64().filter(|id| *id >= 0),
             is_custom_game,
             game_duration,
             timestamp,
-            players: players?,
-            history_owner_puuid: history_owner.map(String::from),
+            players,
         })
     }
 

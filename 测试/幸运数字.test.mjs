@@ -160,9 +160,10 @@ test('未捕获结算阶段而直接返回房间，也清空本局未使用配�
   ctx.app.setLuckyNumber(3); await ctx.tick(); assert.equal(ctx.app.state.configuredLuckyNumber, 3); ctx.app.stop();
 });
 
-test('伤害尾数规则不会创建幸运数字记录', async () => {
+test('旧默认伤害尾数自动迁移到幸运数字并锁定本局数字', async () => {
   const ctx = setup('ReadyCheck', 101, memoryStorage(), 'damage-tail'); ctx.app.setLuckyNumber(7); await ctx.app.start();
-  ctx.phase('GameStart'); await ctx.tick(); assert.deepEqual(ctx.store.snapshot(), {});
+  ctx.phase('GameStart'); await ctx.tick(); assert.equal(ctx.store.get(101).number, 7);
+  assert.equal(ctx.store.rulesSnapshot()['101'].mode, 'lucky-number');
   ctx.phase('EndOfGame'); await ctx.tick(); assert.equal(ctx.app.state.configuredLuckyNumber, null); ctx.app.stop();
 });
 
@@ -172,13 +173,13 @@ test('会话快照已到结算时不根据过期的阶段创建记录', async ()
   assert.equal(ctx.store.get(101), null); ctx.app.stop();
 });
 
-test('GameStart 切换幸运规则被阻止，重复轮询不创建数字记录', async () => {
+test('旧设置启动后使用幸运规则，游戏中不能修改已确认数字', async () => {
   const ctx = setup('GameStart', 101, memoryStorage(), 'damage-tail'); ctx.app.setLuckyNumber(7);
   await ctx.app.start(); ctx.app.selectScoringRule('lucky-number'); await ctx.tick();
-  assert.equal(ctx.app.state.scoringMode, 'damage-tail');
+  assert.equal(ctx.app.state.scoringMode, 'lucky-number');
   assert.match(ctx.app.state.ruleSettingError, /已锁定/);
-  assert.equal(ctx.store.rulesSnapshot()['101'].mode, 'damage-tail');
-  assert.equal(ctx.store.get(101), null); ctx.app.stop();
+  assert.equal(ctx.store.rulesSnapshot()['101'].mode, 'lucky-number');
+  assert.equal(ctx.store.get(101).number, 7); ctx.app.stop();
 });
 
 test('首次会话请求未完成前已锁定，不能利用异步间隙改规则或数字', async () => {
@@ -205,10 +206,11 @@ test('确认成功后锁定规则，结束解锁，历史快照不随下一局�
   const first = {...ctx.store.rulesSnapshot()['101']};
   ctx.app.selectScoringRule('damage-tail'); assert.equal(ctx.app.state.scoringMode, 'lucky-number');
   ctx.phase('EndOfGame'); await ctx.tick(); assert.equal(ctx.app.state.rulesLocked, false);
-  ctx.app.selectScoringRule('damage-tail'); assert.equal(ctx.app.state.scoringMode, 'damage-tail');
+  ctx.app.selectScoringRule('damage-tail'); assert.equal(ctx.app.state.scoringMode, 'lucky-number');
   assert.deepEqual(ctx.app.state.gameRules['101'], first);
   ctx.phase('Lobby'); await ctx.tick(); ctx.id(102); ctx.phase('GameStart'); await ctx.tick();
-  assert.equal(ctx.app.state.gameRules['102'].mode, 'damage-tail');
+  assert.equal(ctx.app.state.gameRules['102'].mode, 'lucky-number');
+  assert.equal(ctx.app.state.gameRules['102'].number, null);
   assert.deepEqual(ctx.app.state.gameRules['101'], first); ctx.app.stop();
 });
 
@@ -277,4 +279,150 @@ test('已经取得编号但保存失败，恢复后仍保存开局原快照', as
     failLock = false; ctx.phase('InProgress'); await ctx.tick();
     assert.equal(ctx.store.get(101).number, 7); assert.equal(ctx.app.state.gameRules['101'].mode, 'lucky-number');
   } finally {Date.now = now; ctx.app.stop();}
+});
+
+test('自定义红包人数接受自动或1～9整数，非法输入保留旧设置', () => {
+  const ctx = setup();
+  assert.equal(ctx.app.state.customPayerCount, null);
+  for (let count = 1; count <= 9; count++) {
+    assert.equal(ctx.app.setCustomPayerCountInput(String(count)), true);
+    assert.equal(ctx.app.state.customPayerCount, count);
+    assert.equal(createLuckyNumbers(ctx.storage).customPayerCount(), count);
+  }
+  for (const value of ['', '0', '10', '-1', '1.5', '03', '+3', ' 3', '３', 'x']) {
+    assert.equal(ctx.app.setCustomPayerCountInput(value), false);
+    assert.equal(ctx.app.state.customPayerCount, 9);
+  }
+  for (const value of [0, 10, -1, 1.5, NaN, Infinity, undefined, '3']) {
+    assert.throws(() => ctx.store.setCustomPayerCount(value));
+  }
+  assert.equal(ctx.app.setCustomPayerCount(null), true);
+  assert.equal(ctx.app.state.customPayerCount, null);
+  assert.equal(createLuckyNumbers(ctx.storage).customPayerCount(), null);
+  assert.equal(JSON.parse(ctx.storage.getItem('luckyState')).version, 6);
+  ctx.app.stop();
+});
+
+test('红包人数保存失败显示错误且不改变持久化值及界面值', () => {
+  const base = memoryStorage(); let broken = false;
+  const storage = {getItem: base.getItem, setItem: (key, value) => { if (broken) throw Error('写入失败'); base.setItem(key, value); }};
+  const ctx = setup('Lobby', 101, storage);
+  assert.equal(ctx.app.setCustomPayerCount(3), true);
+  const saved = storage.getItem('luckyState'); broken = true;
+  assert.equal(ctx.app.setCustomPayerCount(4), false);
+  assert.equal(ctx.app.state.customPayerCount, 3); assert.equal(ctx.store.customPayerCount(), 3);
+  assert.equal(storage.getItem('luckyState'), saved); assert.match(ctx.app.state.payoutSettingError, /未保存.*写入失败/);
+  ctx.app.stop();
+});
+
+test('红包人数在首次会话请求前冻结，开局锁定后禁止修改，结束不消耗长期设置', async () => {
+  const ctx = setup('GameStart'); ctx.app.setCustomPayerCount(3); ctx.app.setLuckyNumber(7);
+  let resolve; ctx.handlers.get_active_game = () => new Promise(done => {resolve = done;});
+  const pending = ctx.app.start(); await new Promise(setImmediate);
+  assert.equal(ctx.app.setCustomPayerCountInput('4'), false);
+  assert.equal(ctx.app.setCustomPayerCount(null), false); assert.match(ctx.app.state.payoutSettingError, /已锁定/);
+  resolve({gameId: 101, phase: 'GameStart'}); await pending;
+  assert.equal(ctx.app.state.gameRules['101'].customPayerCount, 3);
+  ctx.handlers.get_active_game = () => ({gameId: 101, phase: 'EndOfGame'});
+  ctx.phase('EndOfGame'); await ctx.tick();
+  assert.equal(ctx.app.state.customPayerCount, 3); assert.equal(ctx.store.customPayerCount(), 3);
+  assert.equal(ctx.app.state.configuredLuckyNumber, null); assert.equal(ctx.app.state.payoutSettingError, '');
+  ctx.app.stop();
+});
+
+test('对局结束改红包人数不改历史快照，下一局使用新值', async () => {
+  const ctx = setup('Lobby', 101, memoryStorage(), 'damage-tail'); ctx.app.setCustomPayerCount(2); await ctx.app.start();
+  ctx.phase('GameStart'); await ctx.tick(); const first = {...ctx.app.state.gameRules['101']};
+  ctx.phase('EndOfGame'); await ctx.tick(); ctx.app.setCustomPayerCount(4);
+  assert.deepEqual(ctx.app.state.gameRules['101'], first); assert.equal(first.customPayerCount, 2);
+  ctx.phase('Lobby'); await ctx.tick(); ctx.id(102); ctx.phase('GameStart'); await ctx.tick();
+  assert.equal(ctx.app.state.gameRules['102'].customPayerCount, 4);
+  assert.equal(ctx.app.state.gameRules['101'].customPayerCount, 2); ctx.app.stop();
+});
+
+test('游戏中重启恢复当局红包人数，独立长期偏好留待下一局', async () => {
+  const ctx = setup('GameStart'); ctx.app.setCustomPayerCount(2); ctx.app.setLuckyNumber(7); await ctx.app.start(); ctx.app.stop();
+  // 模拟另一实例改动长期偏好；不能影响既有对局锁定记录。
+  createLuckyNumbers(ctx.storage).setCustomPayerCount(4);
+  const next = setup('InProgress', 101, ctx.storage); await next.app.start();
+  assert.equal(next.app.state.rulesLocked, true); assert.equal(next.app.state.customPayerCount, 2);
+  assert.equal(next.app.state.gameRules['101'].customPayerCount, 2); assert.equal(next.store.customPayerCount(), 4);
+  next.phase('EndOfGame'); await next.tick(); assert.equal(next.app.state.customPayerCount, 4);
+  assert.equal(next.app.state.gameRules['101'].customPayerCount, 2); next.app.stop();
+});
+
+test('编号短暂失败并重启时仍绑定原红包人数，不能使用新偏好', async () => {
+  const ctx = setup('GameStart'); ctx.app.setCustomPayerCount(3); ctx.app.setLuckyNumber(7);
+  ctx.handlers.get_active_game = () => null; await ctx.app.start(); ctx.app.stop();
+  createLuckyNumbers(ctx.storage).setCustomPayerCount(5);
+  const next = setup('InProgress', 101, ctx.storage); await next.app.start();
+  assert.equal(next.app.state.gameRules['101'].customPayerCount, 3); assert.equal(next.app.state.customPayerCount, 3);
+  assert.equal(next.store.customPayerCount(), 5); next.app.stop();
+});
+
+test('暂存写入失败后重试仍使用原红包人数快照', async () => {
+  const base = memoryStorage(); let broken = false;
+  const storage = {getItem: base.getItem, setItem: (key, value) => {if (broken) throw Error('磁盘错误'); base.setItem(key, value);}};
+  const ctx = setup('GameStart', 101, storage); ctx.app.setCustomPayerCount(2); ctx.app.setLuckyNumber(7);
+  broken = true; await ctx.app.start(); assert.equal(ctx.app.state.gameRules['101'], undefined);
+  broken = false; ctx.store.setCustomPayerCount(4); await ctx.tick();
+  assert.equal(ctx.app.state.gameRules['101'].customPayerCount, 2);
+  assert.equal(ctx.app.state.customPayerCount, 2); assert.equal(ctx.store.customPayerCount(), 4); ctx.app.stop();
+});
+
+test('幸运数字所有写入与结束清理均保留长期红包人数设置', () => {
+  const storage = memoryStorage(); const store = createLuckyNumbers(storage);
+  store.setCustomPayerCount(4);
+  const remains = () => assert.equal(createLuckyNumbers(storage).customPayerCount(), 4);
+  store.setConfiguredNumber(7); remains(); store.confirm(101); remains();
+  store.setConfiguredNumber(3); store.clearConfiguration(); remains();
+  const opening = {mode: 'damage-tail', number: null, startedAt: Date.now(), gameId: 102, customPayerCount: 4};
+  store.stageOpening(opening); remains(); store.lockGame(102, opening); remains(); store.finishGame(); remains();
+  store.setConfiguredNumber(null); remains();
+});
+
+test('版本2～5记录和未绑定开局快照迁移为自动红包人数，不带入新设置', () => {
+  for (const version of [2, 3, 4, 5]) {
+    const storage = memoryStorage(); storage.setItem('luckyState', JSON.stringify({version, configured: 7, customPayerCount: 4,
+      draws: {'101': {gameId: 101, number: 7, announcedAt: 1}},
+      rules: {'101': {gameId: 101, mode: 'lucky-number', number: 7, lockedAt: 1, customPayerCount: 4}},
+      opening: {gameId: 101, mode: 'lucky-number', number: 7, startedAt: 1, customPayerCount: 4},
+    }));
+    const store = createLuckyNumbers(storage);
+    assert.equal(store.customPayerCount(), null); assert.equal(store.rulesSnapshot()['101'].customPayerCount, null);
+    if (version === 5) assert.equal(store.opening().customPayerCount, null);
+  }
+});
+
+test('中途启动缺少规则记录时不把当前指定人数套入本局', async () => {
+  const ctx = setup('InProgress'); ctx.app.setCustomPayerCount(4); await ctx.app.start();
+  assert.equal(ctx.app.state.gameRules['101'].mode, null);
+  assert.equal(ctx.app.state.gameRules['101'].customPayerCount, null);
+  assert.equal(ctx.store.customPayerCount(), 4); ctx.app.stop();
+});
+
+test('新对局禁止选择伤害尾数，旧局历史规则保留', async () => {
+  const storage = memoryStorage();
+  const store = createLuckyNumbers(storage);
+  store.stageOpening({mode:'damage-tail',number:null,startedAt:Date.now(),gameId:101,customPayerCount:null});
+  store.lockGame(101,store.opening());
+  store.finishGame(true);
+  const ctx = setup('Lobby',102,storage,'damage-tail');
+  await ctx.app.start();
+  ctx.app.selectScoringRule('damage-tail');
+  assert.equal(ctx.app.state.scoringMode,'lucky-number');
+  assert.match(ctx.app.state.ruleSettingError,/已停用/);
+  assert.equal(ctx.app.state.gameRules['101'].mode,'damage-tail');
+  ctx.app.setLuckyNumber(5);ctx.phase('GameStart');await ctx.tick();
+  assert.equal(ctx.app.state.gameRules['102'].mode,'lucky-number');
+  assert.equal(ctx.store.get(102).number,5);
+  ctx.app.stop();
+});
+
+test('参与名单随本局规则持久化，重启后不按当前好友重新筛选',async()=>{
+ const ctx=setup();ctx.handlers.get_lobby_participants=()=>({isCustomGame:true,members:[{puuid:'me',isMe:true},{puuid:'friend',isMe:false}]});
+ await ctx.app.start();ctx.app.setLuckyNumber(5);ctx.phase('GameStart');await ctx.tick();ctx.app.stop();
+ const next=setup('InProgress',101,ctx.storage);await next.app.start();
+ assert.deepEqual(next.app.state.gameRules['101'].participantPuuids,['me','friend']);
+ assert.deepEqual(next.app.state.lockedParticipantPuuids,['me','friend']);next.app.stop();
 });

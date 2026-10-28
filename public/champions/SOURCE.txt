@@ -1,0 +1,3 @@
+Champion assets and Chinese names: Riot Games Data Dragon 16.21.1
+https://ddragon.leagueoflegends.com/
+Game assets, not mock player data.

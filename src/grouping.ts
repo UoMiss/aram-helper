@@ -1,9 +1,10 @@
 // 对局原始数据与分组；评分规则独立接入。
 
 export interface Player {
-  participantId?: number;
+  puuid?: string;
   summonerName: string;
   championId: number;
+  win?: boolean | null;
   teamId?: number | null;
   damage: number;
   damageTaken: number;
@@ -13,17 +14,16 @@ export interface Player {
   assists: number;
   isFriend: boolean;
   isMe: boolean;
-  isHistoryOwner?: boolean;
 }
 
 export interface GameResult {
   gameId: number;
   gameMode: string;
+  queueId?: number | null;
   isCustomGame?: boolean | null;
   gameDuration: number;
   timestamp: number;
   players: Player[];
-  historyOwnerPuuid?: string | null;
 }
 
 export type BattleMode = "solo" | "custom";
@@ -40,14 +40,17 @@ export function detectBattleMode(game: Pick<GameResult, "isCustomGame">): Battle
 }
 
 // 只按本局的真实类型分组，类型或阵营缺失时不猜测参与者。
-export function groupPlayers(game: GameResult): PlayerGroup[] {
+export function groupPlayers(game: GameResult, participantPuuids?: string[] | null): PlayerGroup[] {
+  if (participantPuuids === null) return [];
+  const selected = participantPuuids === undefined ? null : new Set(participantPuuids);
+  const included = (p: Player) => !selected || (!!p.puuid && selected.has(p.puuid));
   const mode = detectBattleMode(game);
   if (!mode || game.players.some((p) => p.teamId == null)) return [];
   if (mode === "solo") {
-    const me = game.players.find((p) => game.historyOwnerPuuid ? p.isHistoryOwner : p.isMe);
+    const me = game.players.find((p) => p.isMe);
     if (!me) return [];
     return game.players
-      .filter((p) => (p === me || p.isMe || p.isFriend) &&
+      .filter((p) => included(p) && (selected !== null || p.isMe || p.isFriend) &&
         p.teamId === me.teamId)
       .map((p) => ({ name: p.summonerName, players: [p] }));
   }
@@ -56,16 +59,6 @@ export function groupPlayers(game: GameResult): PlayerGroup[] {
   if (ids.length !== 2) return [];
   return ids.map((id, index) => ({
     name: id === 100 ? "蓝色方" : id === 200 ? "红色方" : `队伍 ${index + 1}`,
-    players: game.players.filter((p) => p.teamId === id),
-  }));
-}
-
-
-// 好友战绩展示双方全员；参与红包试算的范围仍由 groupPlayers 单独计算。
-export function displayMatchTeams(game: GameResult): PlayerGroup[] {
-  const ids = [...new Set(game.players.map(p => p.teamId ?? null))].sort((a, b) => (a ?? Infinity) - (b ?? Infinity));
-  return ids.map(id => ({
-    name: id === 100 ? "蓝色方" : id === 200 ? "红色方" : id === null ? "未知阵营" : `队伍 ${id}`,
-    players: game.players.filter(p => (p.teamId ?? null) === id),
+    players: game.players.filter((p) => p.teamId === id && included(p)),
   }));
 }

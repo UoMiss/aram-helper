@@ -197,7 +197,7 @@ test("短暂断线和结算会话读取失败不丢失已观察到的本局编�
     get_active_game: () => ({ gameId: 44, phase: "GameStart" }) });
   await ctx.app.start(); ctx.handlers.get_gameflow_phase = () => { throw Error("断线"); }; await ctx.tick();
   assert.equal(ctx.app.state.rulesLocked, true);
-  ctx.app.selectScoringRule("lucky-number"); assert.equal(ctx.app.state.scoringMode, "damage-tail");
+  ctx.app.selectScoringRule("damage-tail"); assert.equal(ctx.app.state.scoringMode, "lucky-number");
   ctx.handlers.get_gameflow_phase = () => "EndOfGame";
   ctx.handlers.get_active_game = () => { throw Error("会话暂不可用"); };
   await ctx.tick(); assert.equal(ctx.app.state.gameResult.gameId, 44); assert.equal(ctx.shown, 1); ctx.app.stop();
@@ -234,4 +234,34 @@ test("结算会话返回旧编号也不能覆盖游戏中已确认的编号", as
   await ctx.app.start(); ctx.handlers.get_gameflow_phase = () => "EndOfGame";
   ctx.handlers.get_active_game = () => ({ gameId: 100, phase: "EndOfGame" });
   await ctx.tick(); assert.equal(ctx.app.state.gameResult.gameId, 101); ctx.app.stop();
+});
+
+const room = (ids=['me','friend'],custom=false) => ({isCustomGame:custom,members:ids.map(puuid=>({puuid,summonerName:puuid,isMe:puuid==='me'}))});
+test('房间人数自动更新、去重，开局名单锁定后不被房间变化影响',async()=>{
+ const ctx=setup({get_lobby_participants:()=>room(['me','friend','friend'])});
+ await ctx.app.start();assert.equal(ctx.app.state.lobbyParticipants.members.length,2);
+ ctx.handlers.get_lobby_participants=()=>room(['me','friend','new']);await ctx.tick();
+ assert.equal(ctx.app.state.lobbyParticipants.members.length,3);
+ ctx.app.setLuckyNumber(5);ctx.handlers.get_gameflow_phase=()=> 'GameStart';await ctx.tick();
+ assert.deepEqual(ctx.app.state.gameRules['1'].participantPuuids,['me','friend','new']);
+ ctx.handlers.get_lobby_participants=()=>room(['me']);await ctx.tick();
+ assert.deepEqual(ctx.app.state.lockedParticipantPuuids,['me','friend','new']);ctx.app.stop();
+});
+test('房间或好友接口失败清空人数，不能沿用上一房间名单',async()=>{
+ const ctx=setup({get_lobby_participants:()=>room()});await ctx.app.start();
+ ctx.handlers.get_lobby_participants=()=>{throw Error('好友不可用')};await ctx.tick();
+ assert.equal(ctx.app.state.lobbyParticipants,null);assert.match(ctx.app.state.lobbyError,/暂不可用/);
+ ctx.handlers.get_gameflow_phase=()=> 'GameStart';await ctx.tick();
+ assert.equal(ctx.app.state.gameRules['1'].participantPuuids,null);ctx.app.stop();
+});
+test('选英雄接口消失可沿用同轮名单，返回大厅则重新读取',async()=>{
+ const ctx=setup({get_lobby_participants:()=>room()});await ctx.app.start();
+ ctx.handlers.get_gameflow_phase=()=> 'ChampSelect';ctx.handlers.get_lobby_participants=()=>{throw Error('no lobby')};await ctx.tick();
+ assert.equal(ctx.app.state.lobbyParticipants.members.length,2);
+ ctx.handlers.get_gameflow_phase=()=> 'Lobby';await ctx.tick();assert.equal(ctx.app.state.lobbyParticipants,null);ctx.app.stop();
+});
+test('观战或缺少成员身份不能成为有效名单',async()=>{
+ for(const members of [[{puuid:'a',isMe:false}],[{puuid:'',isMe:true}]]){
+  const ctx=setup({get_lobby_participants:()=>({isCustomGame:true,members})});await ctx.app.start();assert.equal(ctx.app.state.lobbyParticipants,null);ctx.app.stop();
+ }
 });

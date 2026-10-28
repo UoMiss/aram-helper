@@ -1,18 +1,26 @@
 import { reactive } from "vue";
 import { createLuckyNumbers, type GameOpening } from "./lucky.ts";
 import type { ScoringMode } from "./scoring";
-import { detectBattleMode, type GameResult } from "./grouping.ts";
-
-export interface FriendSummary { puuid: string; displayName: string; }
-export interface ManualTrial { mode: ScoringMode; number: number | null; }
+import type { GameResult } from "./grouping";
 
 type Page = "status" | "result" | "history" | "settings";
 export interface MatchSummary {
+  kills?: number | null;
+  deaths?: number | null;
+  assists?: number | null;
+  endTimestamp?: number | null;
+  win?: boolean | null;
   gameId: number;
   gameMode: string;
+  queueId?: number | null;
+  isCustomGame?: boolean | null;
   gameDuration: number;
   timestamp: number;
   championId: number;
+}
+export interface LobbyParticipants {
+  isCustomGame: boolean;
+  members: { puuid: string; summonerName: string; isMe: boolean }[];
 }
 type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 interface Clock {
@@ -29,7 +37,7 @@ const pregamePhases = ["None", "Lobby", "ChampSelect", "ReadyCheck", "Matchmakin
 const newGamePhases = ["ChampSelect", "ReadyCheck", "Matchmaking", "GameStart", "InProgress"];
 
 // 连接轮询独立于页面导航；每次请求完成后才安排下一次轮询。
-export function createAssistant(invoke: Invoke, showResult: () => Promise<void>, clock = defaultClock, isWindowActive: () => Promise<boolean> = async () => true, luckyNumbers = createLuckyNumbers(), initialScoringMode: ScoringMode = "damage-tail") {
+export function createAssistant(invoke: Invoke, showResult: () => Promise<void>, clock = defaultClock, isWindowActive: () => Promise<boolean> = async () => true, luckyNumbers = createLuckyNumbers(), _initialScoringMode: ScoringMode = "lucky-number") {
   const state = reactive({
     page: "status" as Page,
     cameFrom: "status" as Page,
@@ -37,6 +45,9 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
     summonerName: "",
     gamePhase: "",
     currentIsCustomGame: null as boolean | null,
+    lobbyParticipants: null as LobbyParticipants | null,
+    lobbyError: "",
+    lockedParticipantPuuids: null as string[] | null,
     connectionError: "",
     errorMsg: "",
     loading: false,
@@ -44,13 +55,6 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
     connecting: false,
     gameResult: null as GameResult | null,
     matchList: [] as MatchSummary[],
-    friends: [] as FriendSummary[],
-    friendsLoading: false,
-    friendsError: "",
-    historyOwner: null as FriendSummary | null,
-    resultOwner: null as FriendSummary | null,
-    trial: null as ManualTrial | null,
-    trialError: "",
     luckyDraws: luckyNumbers.snapshot(),
     gameRules: luckyNumbers.rulesSnapshot(),
     rulesLocked: false,
@@ -58,15 +62,16 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
     ruleSettingError: "",
     currentGameId: null as number | null,
     luckyError: "",
-    scoringMode: initialScoringMode,
+    scoringMode: "lucky-number" as ScoringMode,
     configuredLuckyNumber: luckyNumbers.configured(),
     luckySettingError: "",
+    customPayerCount: luckyNumbers.customPayerCount(),
+    payoutSettingError: "",
   });
   let timer: unknown;
   let running = false;
   let disposed = false;
   let navigation = 0;
-  let friendsRequest = 0;
   let automaticResult = false;
   let lastAutomaticGame: number | null = null;
   let endHandled = false;
@@ -82,8 +87,6 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
     state.historyLoading = false;
     state.errorMsg = "";
     automaticResult = false;
-    state.trial = null;
-    state.trialError = "";
   }
   const isCurrent = (id: number) => !disposed && id === navigation;
 
@@ -112,10 +115,39 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
     return setLuckyNumber(value === "" ? null : Number(value));
   }
 
+  function setCustomPayerCount(count: number | null) {
+    if (disposed) return false;
+    if (state.rulesLocked) {
+      state.payoutSettingError = "本局红包人数已锁定，对局结束后可修改。";
+      return false;
+    }
+    try {
+      luckyNumbers.setCustomPayerCount(count);
+      state.customPayerCount = luckyNumbers.customPayerCount();
+      state.payoutSettingError = "";
+      return true;
+    } catch (error) {
+      state.payoutSettingError = `红包人数未保存：${String(error)}`;
+      return false;
+    }
+  }
+
+  function setCustomPayerCountInput(value: string) {
+    if (!/^[1-9]$/.test(value)) {
+      state.payoutSettingError = "只允许输入 1～9 的单个整数。";
+      return false;
+    }
+    return setCustomPayerCount(Number(value));
+  }
+
   function selectScoringRule(mode: ScoringMode) {
     if (disposed) return;
     if (state.rulesLocked) {
       state.ruleSettingError = "本局红包规则已锁定，对局结束后可修改。";
+      return;
+    }
+    if (mode !== "lucky-number") {
+      state.ruleSettingError = "伤害尾数规则已停用，新对局仅支持幸运数字。";
       return;
     }
     state.scoringMode = mode;
@@ -126,6 +158,7 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
     state.gameRules = luckyNumbers.rulesSnapshot();
     state.luckyDraws = luckyNumbers.snapshot();
     state.configuredLuckyNumber = luckyNumbers.configured();
+    state.customPayerCount = state.rulesLocked && opening ? opening.customPayerCount ?? null : luckyNumbers.customPayerCount();
   }
 
   type Session = { gameId: number; phase: string };
@@ -157,6 +190,28 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
           settlementPending = false;
         }
       }
+      // 房间阶段刷新名单；选英雄期间接口消失时沿用同一轮已确认的房间名单。
+      if (pregamePhases.includes(phase)) {
+        if (phase === "None") {
+          state.lobbyParticipants = null;
+          state.lobbyError = "进入房间后自动读取参与者";
+        } else {
+          try {
+            const lobby = await invoke<LobbyParticipants>("get_lobby_participants");
+            if (disposed) return;
+            if (!lobby || typeof lobby.isCustomGame !== "boolean" || !Array.isArray(lobby.members)
+              || !lobby.members.some(m => m.isMe) || lobby.members.some(m => typeof m.puuid !== "string" || !m.puuid)) throw Error("房间成员尚未就绪");
+            state.lobbyParticipants = { ...lobby, members: lobby.members.filter((m,i,all) => all.findIndex(n=>n.puuid===m.puuid)===i) };
+            state.lobbyError = "";
+          } catch {
+            if (disposed) return;
+            if (phase === "Lobby" || !state.lobbyParticipants) {
+              state.lobbyParticipants = null;
+              state.lobbyError = "房间或好友名单暂不可用，正在重试";
+            }
+          }
+        }
+      }
       if (activePhases.includes(phase)) {
         // 在第一个异步会话查询之前冻结设置；后续重试只使用这个快照。
         state.rulesLocked = true;
@@ -166,8 +221,11 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
             mode: isOpening ? state.scoringMode : null,
             number: isOpening && state.scoringMode === "lucky-number" ? state.configuredLuckyNumber : null,
             startedAt: Date.now(), gameId: null,
+            customPayerCount: isOpening ? state.customPayerCount : null,
+            participantPuuids: isOpening && state.lobbyParticipants ? state.lobbyParticipants.members.map(m => m.puuid) : null,
           };
         }
+        state.lockedParticipantPuuids = opening.participantPuuids ?? null;
         state.activeScoringMode = opening.mode;
         try {
           luckyNumbers.stageOpening(opening);
@@ -181,10 +239,12 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
             const age = Date.now() - opening.startedAt;
             if (opening.gameId === null && age >= 0 && age <= 15000) opening = { ...opening, gameId: active.gameId };
             const rule = luckyNumbers.lockGame(active.gameId, opening);
-            opening = { ...opening, gameId: active.gameId };
+            opening = { ...opening, gameId: active.gameId, customPayerCount: rule.customPayerCount ?? null };
             syncRules();
+            state.lockedParticipantPuuids = rule.participantPuuids ?? null;
             state.activeScoringMode = rule.mode;
-            if (rule.mode) state.scoringMode = rule.mode;
+            // 旧局可恢复已锁定规则，新局始终使用幸运数字。
+            state.scoringMode = "lucky-number";
             state.luckyError = rule.mode === null ? "未记录本局开局规则，不能补设；本局仅展示战绩。"
               : rule.mode === "lucky-number" && rule.number === null
                 ? "本局开局时未填写幸运数字，不能补设。" : "";
@@ -212,9 +272,12 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
           opening = null;
           syncRules();
           state.rulesLocked = false;
+          state.lockedParticipantPuuids = null;
+          if (endingPhases.includes(phase)) state.lobbyParticipants = null;
           state.activeScoringMode = null;
           state.ruleSettingError = "";
           state.luckySettingError = "";
+          state.payoutSettingError = "";
         } catch (error) { state.luckyError = `本局记录更新失败：${String(error)}`; }
       }
       if (disposed) return;
@@ -250,7 +313,6 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
             navigate("result");
             state.cameFrom = "status";
             state.gameResult = result;
-            state.resultOwner = null;
             automaticResult = true;
             await showResult().catch(() => {});
           }
@@ -263,6 +325,8 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
     } catch (error) {
       if (!disposed) {
         state.connStatus = "disconnected";
+        state.lobbyParticipants = null;
+        state.lobbyError = "客户端已断开";
         state.gamePhase = "";
         state.currentIsCustomGame = null;
         state.currentGameId = null;
@@ -279,20 +343,16 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
   async function viewResult(gameId?: number) {
     if (state.loading || state.historyLoading) return;
     const source = state.page === "result" ? state.cameFrom : state.page;
-    const owner = gameId === undefined ? null : (state.page === "result" ? state.resultOwner : state.historyOwner);
     const id = ++navigation;
     state.loading = true;
     state.errorMsg = "";
     try {
       const result = gameId === undefined
         ? await invoke<GameResult>("get_last_game_result")
-        : owner ? await invoke<GameResult>("get_friend_game_result", { gameId, puuid: owner.puuid })
-          : await invoke<GameResult>("get_game_result", { gameId });
+        : await invoke<GameResult>("get_game_result", { gameId });
       if (!isCurrent(id)) return;
       if (!result || (gameId !== undefined && result.gameId !== gameId)) throw new Error("返回的战绩编号不一致");
-      if (owner && result.historyOwnerPuuid !== owner.puuid) throw new Error("返回的战绩不属于所选好友");
       navigate("result");
-      state.resultOwner = owner;
       state.gameResult = result;
       state.cameFrom = source;
     } catch (error) {
@@ -302,35 +362,13 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
     }
   }
 
-  async function loadFriends() {
-    const id = ++friendsRequest;
-    state.friendsLoading = true;
-    state.friendsError = "";
-    try {
-      const friends = await invoke<FriendSummary[]>("get_friends");
-      if (!Array.isArray(friends) || friends.some(friend => !friend?.puuid || typeof friend.displayName !== "string")) {
-        throw new Error("好友列表数据不完整");
-      }
-      if (!disposed && id === friendsRequest) state.friends = friends;
-    } catch (error) {
-      if (!disposed && id === friendsRequest) state.friendsError = `好友列表暂时不可用：${String(error)}`;
-    } finally {
-      if (!disposed && id === friendsRequest) state.friendsLoading = false;
-    }
-  }
-
   async function loadHistory() {
     navigate("history");
     const id = navigation;
-    const owner = state.historyOwner;
     state.historyLoading = true;
     state.matchList = [];
-    if (!state.friends.length && !state.friendsLoading) void loadFriends();
     try {
-      const matches = owner
-        ? await invoke<MatchSummary[]>("get_friend_match_list", { puuid: owner.puuid })
-        : await invoke<MatchSummary[]>("get_match_list");
-      if (!Array.isArray(matches)) throw new Error("战绩列表数据不完整");
+      const matches = await invoke<MatchSummary[]>("get_match_list");
       if (isCurrent(id)) state.matchList = matches;
     } catch (error) {
       if (isCurrent(id)) state.errorMsg = `历史记录暂时不可用，请确认客户端已连接。${String(error)}`;
@@ -338,42 +376,9 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
       if (isCurrent(id)) state.historyLoading = false;
     }
   }
-
-  async function selectHistoryOwner(puuid: string) {
-    const friend = puuid ? state.friends.find(friend => friend.puuid === puuid) : null;
-    if (puuid && !friend) { state.friendsError = "请刷新好友列表后重新选择。"; return; }
-    state.historyOwner = friend ? { ...friend } : null;
-    await loadHistory();
-  }
-
-  function startTrial() {
-    if (state.page !== "result" || !state.resultOwner || !state.gameResult) return;
-    if (!detectBattleMode(state.gameResult)) { state.trialError = "无法识别对局类型，暂不能试算。"; return; }
-    // 试算只读取当前偏好，不写入开局规则或待配置幸运数字。
-    state.trial = { mode: state.scoringMode, number: null };
-    state.trialError = "";
-  }
-  function setTrialRule(mode: ScoringMode) {
-    if (state.trial && (mode === "damage-tail" || mode === "lucky-number")) {
-      state.trial.mode = mode;
-      state.trialError = "";
-    }
-  }
-  function setTrialNumberInput(value: string) {
-    if (!state.trial) return false;
-    if (value !== "" && !/^[0-9]$/.test(value)) {
-      state.trialError = "只允许输入 0～9 的单个整数。";
-      return false;
-    }
-    state.trial.number = value === "" ? null : Number(value);
-    state.trialError = "";
-    return true;
-  }
-  function stopTrial() { state.trial = null; state.trialError = ""; }
   function goHome() {
     navigate("status");
     state.gameResult = null;
-    state.resultOwner = null;
   }
   function goBack() {
     if (state.page === "result" && state.cameFrom === "history") navigate("history");
@@ -386,15 +391,11 @@ export function createAssistant(invoke: Invoke, showResult: () => Promise<void>,
     selectScoringRule,
     setLuckyNumber,
     setLuckyNumberInput,
+    setCustomPayerCount,
+    setCustomPayerCountInput,
     viewLastGame: () => viewResult(),
     viewGame: (gameId: number) => viewResult(gameId),
     loadHistory,
-    loadFriends,
-    selectHistoryOwner,
-    startTrial,
-    setTrialRule,
-    setTrialNumberInput,
-    stopTrial,
     goBack,
     goHome,
     openSettings: () => navigate("settings"),

@@ -51,31 +51,20 @@ test('匹配模式缺少本人身份时不误将双方好友列入比较', () =>
   assert.deepEqual(groupPlayers({ isCustomGame: false, players: game.players.slice(1) }), []);
 });
 
-test('好友匹配以查看对象的队伍为准，本人未参赛也可筛选我的同队好友', () => {
-  const result = {isCustomGame:false,historyOwnerPuuid:'friend-a',players:[
-    player('查看对象',200,{isHistoryOwner:true,isFriend:true}),
-    player('我的同队好友',200,{isFriend:true}), player('同队路人',200),
-    player('另一边好友',100,{isFriend:true}), player('另一边路人',100),
-  ]};
-  assert.deepEqual(groupPlayers(result).map(g=>g.name),['查看对象','我的同队好友']);
+test('开局名单限定匹配参与者：排除房间外好友，使用身份而非名称匹配', () => {
+  const players = [
+    player('同名',100,{puuid:'me',isMe:true}),
+    player('同名',100,{puuid:'friend',isFriend:false}),
+    player('房间外好友',100,{puuid:'outside',isFriend:true}),
+    player('对方',200,{puuid:'enemy',isFriend:true}),
+  ];
+  const included = groupPlayers({isCustomGame:false,players},['me','friend']).flatMap(g=>g.players);
+  assert.deepEqual(included.map(p=>p.puuid),['me','friend']);
 });
-
-test('好友匹配里本人同队计入，本人在对面不计入', () => {
-  const result={isCustomGame:false,historyOwnerPuuid:'friend-a',players:[
-    player('查看对象',200,{isHistoryOwner:true}),player('自己',200,{isMe:true}),
-    player('好友',200,{isFriend:true}),player('路人',200),player('对面',100),
-  ]};
-  assert.deepEqual(groupPlayers(result).map(g=>g.name),['查看对象','自己','好友']);
-  result.players[1].teamId=100;
-  assert.deepEqual(groupPlayers(result).map(g=>g.name),['查看对象','好友']);
-});
-
-test('好友详情缺少查看对象身份时不误用自己所在队伍', () => {
-  assert.deepEqual(groupPlayers({...game,historyOwnerPuuid:'friend-a'}),[]);
-});
-
-test('好友自定义仍包含双方所有人，不受好友关系和本人是否参赛限制', () => {
-  const result={isCustomGame:true,historyOwnerPuuid:'friend-a',players:Array.from({length:10},(_,i)=>
-    player(String(i),i<5?100:200,{isHistoryOwner:i===5,isFriend:i===5}))};
-  assert.equal(groupPlayers(result).flatMap(g=>g.players).length,10);
+test('自定义双方仅开局名单参与，非好友排除，允许一边没有参与者', () => {
+  const players = [player('我',100,{puuid:'me',isMe:true}), player('好友',200,{puuid:'friend'}),player('路人',200,{puuid:'other'})];
+  const game = {isCustomGame:true,players};
+  assert.deepEqual(groupPlayers(game,['me','friend']).flatMap(g=>g.players).map(p=>p.puuid),['me','friend']);
+  assert.deepEqual(groupPlayers(game,['me']).map(g=>g.players.length),[1,0]);
+  assert.deepEqual(groupPlayers(game,null),[]);
 });
