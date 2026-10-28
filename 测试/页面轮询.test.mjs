@@ -2,13 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createAssistant } from "../src/assistant.ts";
 
-const game = (gameId = 1) => ({ gameId, gameMode: "ARAM", gameDuration: 1200, timestamp: Date.now(), players: [], hasAccurateFloors: true });
+const game = (gameId = 1) => ({ gameId, gameMode: "ARAM", gameDuration: 1200, timestamp: Date.now(), players: [] });
 const deferred = () => { let resolve; let reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const flush = () => new Promise(setImmediate);
 function setup(overrides = {}, isWindowActive = async () => true) {
   const jobs = new Map(); let next = 0; let shown = 0;
   const calls = [];
-  const handlers = { check_connection: () => "测试玩家", get_gameflow_phase: () => "Lobby", get_damage_ranking: () => game(), get_match_list: () => [], get_game_result: () => game(), ...overrides };
+  const handlers = { check_connection: () => "测试玩家", get_gameflow_phase: () => "Lobby", get_last_game_result: () => game(), get_match_list: () => [], get_game_result: () => game(), ...overrides };
   const app = createAssistant(async (command, args) => { calls.push(command); return handlers[command]?.(args); }, async () => { shown++; }, {
     setTimeout(fn) { const id = ++next; jobs.set(id, fn); return id; },
     clearTimeout(id) { jobs.delete(id); },
@@ -20,7 +20,7 @@ function setup(overrides = {}, isWindowActive = async () => true) {
 }
 
 test("上一局读取失败后显示错误，后台仍然轮询", async () => {
-  const ctx = setup({ get_damage_ranking: () => { throw new Error("数据尚未准备好"); } });
+  const ctx = setup({ get_last_game_result: () => { throw new Error("数据尚未准备好"); } });
   await ctx.app.start(); await ctx.app.viewLastGame();
   assert.match(ctx.app.state.errorMsg, /读取对局失败/);
   assert.equal(ctx.app.state.loading, false);
@@ -54,14 +54,13 @@ test("离开页面后，迟到的历史详情不会覆盖新页面", async () =>
 
 test("自动结算只显示一次；下一局开始自动收起；等待统计时不读取旧局", async () => {
   const ctx = setup({ get_gameflow_phase: () => "WaitingForStats" }); await ctx.app.start();
-  assert.equal(ctx.calls.includes("get_damage_ranking"), false);
+  assert.equal(ctx.calls.includes("get_last_game_result"), false);
   ctx.handlers.get_gameflow_phase = () => "EndOfGame"; await ctx.tick();
   assert.equal(ctx.app.state.page, "result"); assert.equal(ctx.shown, 1);
   ctx.app.goHome(); await ctx.tick(); assert.equal(ctx.shown, 1);
-  assert.equal(ctx.calls.filter(c => c === "get_damage_ranking").length, 1);
+  assert.equal(ctx.calls.filter(c => c === "get_last_game_result").length, 1);
   ctx.handlers.get_gameflow_phase = () => "ChampSelect"; await ctx.tick();
-  assert.ok(ctx.calls.includes("capture_champ_select"));
-  ctx.handlers.get_damage_ranking = () => game(2); ctx.handlers.get_gameflow_phase = () => "EndOfGame"; await ctx.tick();
+  ctx.handlers.get_last_game_result = () => game(2); ctx.handlers.get_gameflow_phase = () => "EndOfGame"; await ctx.tick();
   assert.equal(ctx.shown, 2);
   ctx.handlers.get_gameflow_phase = () => "InProgress"; await ctx.tick(); assert.equal(ctx.app.state.page, "status");
   ctx.app.stop();
@@ -90,7 +89,7 @@ test("卸载时正在进行的请求不会再启动轮询或更新页面", async
 });
 
 test("自动结算请求期间进入设置，迟到的结果不会跳转或弹窗", async () => {
-  const pending = deferred(); const ctx = setup({ get_gameflow_phase: () => "EndOfGame", get_damage_ranking: () => pending.promise });
+  const pending = deferred(); const ctx = setup({ get_gameflow_phase: () => "EndOfGame", get_last_game_result: () => pending.promise });
   const request = ctx.app.start(); await flush(); ctx.app.openSettings(); pending.resolve(game()); await request;
   assert.equal(ctx.app.state.page, "settings"); assert.equal(ctx.shown, 0); assert.equal(ctx.app.state.loading, false); ctx.app.stop();
 });
@@ -100,7 +99,7 @@ test("新一局结束但接口暂时返回上一局时，继续等待新结果",
   ctx.handlers.get_gameflow_phase = () => "ChampSelect"; await ctx.tick();
   ctx.handlers.get_gameflow_phase = () => "EndOfGame"; await ctx.tick();
   assert.equal(ctx.shown, 1); assert.equal(ctx.app.state.page, "status");
-  ctx.handlers.get_damage_ranking = () => game(2); await ctx.tick();
+  ctx.handlers.get_last_game_result = () => game(2); await ctx.tick();
   assert.equal(ctx.shown, 2); assert.equal(ctx.app.state.gameResult.gameId, 2); ctx.app.stop();
 });
 

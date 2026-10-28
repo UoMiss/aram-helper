@@ -7,3 +7,5 @@ src-tauri/target/
 website/downloads/
 .edgeone/
 tauri.manual.conf.json
+
+预览/

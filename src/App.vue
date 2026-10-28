@@ -7,7 +7,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import html2canvas from "html2canvas-pro";
-import { RULES, getRule } from "./rules";
+import { groupPlayers } from "./grouping";
+import { damageTail, evaluateDamageTails, evaluateLuckyNumbers, DAMAGE_TAIL_DESCRIPTION, LUCKY_NUMBER_DESCRIPTION } from "./scoring";
+
+import type { BattleMode, Player } from "./grouping";
 
 const assistant = createAssistant(invoke, async () => {
   const window = getCurrentWindow();
@@ -16,34 +19,61 @@ const assistant = createAssistant(invoke, async () => {
 }, undefined, async () => {
   const window = getCurrentWindow();
   return await window.isVisible() && !await window.isMinimized();
-});
+}, undefined, localStorage.getItem("scoringMode") === "lucky-number" ? "lucky-number" : "damage-tail");
 const { page, connStatus, summonerName, gamePhase, errorMsg, connectionError,
-  loading, historyLoading, connecting, gameResult, matchList } = toRefs(assistant.state);
-const { viewLastGame, loadHistory, viewGame, goBack, openSettings, retryConnection } = assistant;
+  loading, historyLoading, connecting, gameResult, matchList, luckyDraws, currentGameId, luckyError, scoringMode, pendingLuckyDraw } = toRefs(assistant.state);
+const { viewLastGame, loadHistory, viewGame, goBack, openSettings, retryConnection, selectScoringRule } = assistant;
 const appVersion = ref("");
 
-// 当前规则（从 localStorage 读取）
-const currentRuleId = ref<string>(getRule(localStorage.getItem("ruleId") || "classic").id);
-watch(currentRuleId, (v) => localStorage.setItem("ruleId", v));
-
-// 4 人局模式（组队 vs 个人战），仅影响经典规则
-const fourPlayerMode = ref<"team" | "solo">(
-  localStorage.getItem("4pMode") === "solo" ? "solo" : "team"
-);
-watch(fourPlayerMode, (v) => localStorage.setItem("4pMode", v));
-
-const currentRule = computed(() => getRule(currentRuleId.value));
-const ruleResult = computed(() => {
-  if (!gameResult.value) return null;
-  return currentRule.value.calculate(gameResult.value, {
-    fourPlayerMode: fourPlayerMode.value,
-  });
+// 分组决定参与者；两种模式共用伤害尾数比较规则。
+const battleMode = ref<BattleMode>(localStorage.getItem("battleMode") === "custom" ? "custom" : "solo");
+watch(battleMode, (value) => localStorage.setItem("battleMode", value));
+const groupingLabel = computed(() => battleMode.value === "solo" ? "匹配模式" : "自定义模式");
+const playerGroups = computed(() => gameResult.value
+  ? groupPlayers(gameResult.value, battleMode.value)
+  : []);
+const canShowGroups = computed(() => playerGroups.value.length >= 2);
+const activeLuckyDraw = computed(() => {
+  if (scoringMode.value !== "lucky-number") return null;
+  if (currentGameId.value !== null) return luckyDraws.value[String(currentGameId.value)] ?? null;
+  return page.value === "status" ? pendingLuckyDraw.value : null;
+});
+const resultLuckyDraw = computed(() => gameResult.value ? luckyDraws.value[String(gameResult.value.gameId)] ?? null : null);
+const luckyResult = computed(() => evaluateLuckyNumbers(playerGroups.value.flatMap((group) => group.players), resultLuckyDraw.value?.number ?? null));
+watch(scoringMode, (mode) => localStorage.setItem("scoringMode", mode));
+const scoringRules = [
+  { id: "damage-tail" as const, name: "伤害尾数", summary: ["尾数越大排名越前，末位发红包。", "同分依次比较十位、百位等数值。"], description: DAMAGE_TAIL_DESCRIPTION },
+  { id: "lucky-number" as const, name: "幸运数字", summary: ["确认对局时抽取，距离越近越靠前。", "同分逐位比较距离，末位发红包。"], description: LUCKY_NUMBER_DESCRIPTION },
+];
+const currentRule = computed(() => scoringRules.find((rule) => rule.id === scoringMode.value)!);
+const scoreDescription = computed(() => currentRule.value.description);
+const scoringResult = computed(() => scoringMode.value === "lucky-number"
+  ? luckyResult.value
+  : evaluateDamageTails(playerGroups.value.flatMap((group) => group.players)));
+const resultMessage = computed(() => {
+  const result = scoringResult.value;
+  const names = result.lowestPlayers.map((player) => player.summonerName).join("、");
+  if (result.status === "ready") return `发红包：${names}`;
+  if (result.status === "tie") return scoringMode.value === "lucky-number"
+    ? `末位并列：${names}。伤害各位与幸运数字的距离均相同，需手动确定。`
+    : `完全并列：${names}。完整伤害相同，需手动确定。`;
+  if (result.status === "missing") return "本局没有赛前公开的幸运数字，无法按此规则排名，不在结算后补抽。";
+  if (result.status === "invalid") return "伤害数据不完整，暂不判定，请重新读取对局。";
+  return "参与人数不足，暂不判定。";
 });
 
-// 是否显示 4 人局模式切换
-const show4pToggle = computed(
-  () => currentRule.value.id === "classic" && ruleResult.value?.friendCount === 4
-);
+const lowestNames = computed(() => scoringResult.value.lowestPlayers.map((player) => player.summonerName).join("、"));
+const displayedGroups = computed(() => {
+  if (scoringMode.value !== "lucky-number" || !luckyResult.value.ranking.length) return playerGroups.value;
+  const ranks = new Map(luckyResult.value.ranking.map((entry) => [entry.player, entry.rank]));
+  const groups = playerGroups.value.map((group) => ({ ...group,
+    players: [...group.players].sort((a, b) => ranks.get(a)! - ranks.get(b)!),
+  }));
+  return battleMode.value === "solo" ? groups.sort((a, b) => ranks.get(a.players[0])! - ranks.get(b.players[0])!) : groups;
+});
+function playerRank(player: Player) {
+  return luckyResult.value.ranking.find((entry) => entry.player === player)?.rank;
+}
 
 // ────── 自动更新状态（先声明，computeTargetHeight 会用） ──────
 type UpdateState = "idle" | "available" | "downloading" | "ready" | "failed";
@@ -56,34 +86,18 @@ const appRoot = ref<HTMLElement>();
 
 function computeTargetHeight(): number {
   const updateHeight = updateState.value !== "idle" ? 48 : 0;
-  if (page.value === "status") return 420 + updateHeight;
+  const luckyHeight = scoringMode.value === "lucky-number" && (activeLuckyDraw.value || luckyError.value) ? 58 : 0;
+  if (page.value === "status") return 420 + updateHeight + luckyHeight;
   if (page.value === "history") return 580 + updateHeight;
-  if (page.value === "settings") return 540 + updateHeight;
-
-  if (page.value === "result" && ruleResult.value) {
-    const r = ruleResult.value;
-    let h = 36; // 上下 padding
-    h += 62; // nav（含分隔线和 margin）
-    if (show4pToggle.value) h += 56;
-    if (r.needsFloors && !gameResult.value?.hasAccurateFloors) h += 42;
-    if (r.isRedPacketGame) {
-      if (loserTeam.value) {
-        const names = loserTeam.value.players.map((p) => p.summonerName).join("、");
-        const wrap = names.length > 14 ? 1 : 0;
-        h += 96 + wrap * 28; // 输家横幅（名字 + slogan）
-      }
-      for (const t of r.teams) {
-        h += 84; // 队伍头部、统计列名、边框和间距
-        h += t.players.length * 24; // 每个玩家行
-      }
-      h += 16; // 底部安全 buffer
-      h += 54; // 规则说明和水印
-      h += 50; // 分享按钮
-    } else {
-      h += 100;
-    }
-    // 更新条出现时也要预留高度
-    if (updateState.value !== "idle") h += 48;
+  if (page.value === "settings") return 540 + updateHeight + luckyHeight;
+  if (page.value === "result" && gameResult.value) {
+    let h = 36 + 62 + 56 + updateHeight;
+    if (canShowGroups.value) {
+      h += scoringResult.value.status === "ready" ? 110 : 60;
+      if (scoringMode.value === "lucky-number" && resultLuckyDraw.value) h += 42;
+      for (const group of playerGroups.value) h += 84 + group.players.length * 24;
+      h += 120;
+    } else h += 100;
     return Math.max(380, Math.min(820, h));
   }
   return 480;
@@ -96,19 +110,14 @@ async function resizeToContent() {
   } catch {}
 }
 
-watch([page, ruleResult, fourPlayerMode, updateState], () => {
+watch([page, playerGroups, battleMode, updateState, scoringMode, activeLuckyDraw, luckyError], () => {
   resizeToContent();
 });
-const loserTeam = computed(() => ruleResult.value?.teams.find((t) => t.isLoser));
 
 // ────── 工具 ──────
 
 function fmt(n: number) { return Math.round(n).toLocaleString(); }
 function fmtDur(s: number) { return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, "0")}`; }
-function fmtScore(s: number, label: string) {
-  if (label === "OP 分") return s.toFixed(1);
-  return fmt(s);
-}
 function fmtTime(ts: number) {
   const d = new Date(ts), now = new Date();
   const days = Math.round((new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()) / 86400000);
@@ -273,7 +282,7 @@ onUnmounted(() => {
         </div>
         <p class="title">LOL 红包局助手</p>
         <p class="sub">等待连接英雄联盟</p>
-        <p class="connection-guide">打开并登录客户端后会自动连接。<br />请在选英雄前启动助手，以记录准确分队。</p>
+        <p class="connection-guide">打开并登录客户端后会自动连接。<br />匹配模式比较自己和同队好友，自定义模式展示双方玩家。</p>
         <div class="dots"><i /><i /><i /></div>
         <div class="row" style="margin-top:16px">
           <button class="btn-s" @click="retryConnection" :disabled="connecting">{{ connecting ? "连接中…" : "重新连接" }}</button>
@@ -293,7 +302,9 @@ onUnmounted(() => {
         <p class="title">已连接</p>
         <p class="name">{{ summonerName }}</p>
         <p class="sub">{{ gamePhase ? phaseText(gamePhase) : "等待对局结束" }}</p>
-        <p class="rule-tag">规则：{{ currentRule.name }}</p>
+        <p class="rule-tag">{{ groupingLabel }} · {{ currentRule.name }}</p>
+        <p v-if="activeLuckyDraw" class="approx-tip">幸运数字 <strong>{{ activeLuckyDraw.number }}</strong> · 已公开</p>
+        <p v-if="luckyError" class="err">{{ luckyError }}</p>
         <p class="connection-guide">{{ gamePhase === "WaitingForStats" ? "正在等待客户端生成结算数据…" : "对局结束自动结算，可以关闭窗口收进托盘。" }}</p>
         <div class="dots"><i /><i /><i /></div>
         <div class="row" style="margin-top:20px">
@@ -308,7 +319,7 @@ onUnmounted(() => {
     </template>
 
     <!-- ====== 结果页 ====== -->
-    <template v-else-if="page === 'result' && gameResult && ruleResult">
+    <template v-else-if="page === 'result' && gameResult">
       <div class="page scrollable">
         <div class="nav">
           <button class="btn-back" @click="goBack">返回</button>
@@ -316,55 +327,45 @@ onUnmounted(() => {
           <span class="nav-meta">{{ modeName(gameResult.gameMode) }} {{ fmtDur(gameResult.gameDuration) }}</span>
         </div>
 
-        <div v-if="!ruleResult.isRedPacketGame" class="center-page" style="padding:24px 0">
-          <p class="sub">本局好友不足 2 人，不算红包局</p>
+        <div v-if="!canShowGroups" class="center-page" style="padding:24px 0">
+          <p class="sub">{{ battleMode === "solo" ? "自己和同队好友不足 2 人，无法比较" : "缺少双方阵营数据，请重新读取对局" }}</p>
         </div>
 
         <template v-else>
-          <!-- 4 人局：组队 / 个人战切换 -->
-          <div v-if="show4pToggle" class="mode-toggle">
-            <button
-              class="mode-btn"
-              :class="{ active: fourPlayerMode === 'team' }"
-              @click="fourPlayerMode = 'team'"
-            >组队 2v2</button>
-            <button
-              class="mode-btn"
-              :class="{ active: fourPlayerMode === 'solo' }"
-              @click="fourPlayerMode = 'solo'"
-            >个人战</button>
+          <div class="mode-toggle" aria-label="分组模式">
+            <button class="mode-btn" :class="{ active: battleMode === 'solo' }" @click="battleMode = 'solo'">匹配模式</button>
+            <button class="mode-btn" :class="{ active: battleMode === 'custom' }" @click="battleMode = 'custom'">自定义模式</button>
           </div>
 
           <!-- 截图区域 -->
           <div ref="resultArea" class="share-area">
-            <p v-if="ruleResult.needsFloors && !gameResult.hasAccurateFloors" class="approx-tip">
-              未记录选英雄楼层，当前分队为推测结果。
-            </p>
-            <div v-if="loserTeam" class="loser-box">
-              <div class="loser-name">{{ loserTeam.players.map(p => p.summonerName).join("、") }}</div>
+            <p v-if="scoringMode === 'lucky-number' && resultLuckyDraw" class="approx-tip">幸运数字 <strong>{{ resultLuckyDraw.number }}</strong> · 赛前已公开</p>
+            <div v-if="scoringResult.status === 'ready'" class="loser-box">
+              <div class="loser-name">{{ lowestNames }}</div>
               <div class="loser-slogan">就是你了，发红包吧！</div>
             </div>
+            <p v-else class="approx-tip" role="status">{{ resultMessage }}</p>
 
             <div
-              v-for="(team, i) in ruleResult.teams"
+              v-for="(team, i) in displayedGroups"
               :key="i"
               class="team"
-              :class="{ lose: team.isLoser }"
+              :class="{ lose: battleMode === 'solo' && team.players.some(p => scoringResult.lowestPlayers.includes(p)) }"
             >
               <div class="team-top">
                 <span class="team-name" :title="team.name">{{ team.name }}</span>
-                <span class="team-pts">{{ fmtScore(team.score, ruleResult.scoreLabel) }} {{ ruleResult.scoreLabel }}</span>
+                <span class="team-pts">{{ team.players.length === 1 ? `${damageTail(team.players[0].damage) ?? "—"} 尾数` : `${team.players.length} 人` }}</span>
               </div>
               <div class="p-row p-head"><span class="p-name">玩家</span><span class="p-dmg">伤害</span><span class="p-tkn">承伤</span><span class="p-kda">K / D / A</span></div>
-              <div v-for="p in team.players" :key="p.summonerName" class="p-row">
-                <span class="p-name" :title="p.summonerName">{{ p.summonerName }}<b v-if="p.isMe" class="me-tag">我</b></span>
+              <div v-for="p in team.players" :key="p.summonerName" class="p-row" :class="{ 'lowest-player': scoringResult.lowestPlayers.includes(p) }">
+                <span class="p-name" :title="p.summonerName"><b v-if="scoringMode === 'lucky-number' && playerRank(p)" class="rank-tag">#{{ playerRank(p) }}</b>{{ p.summonerName }}<b v-if="p.isMe" class="me-tag">我</b></span>
                 <span class="p-dmg">{{ fmt(p.damage) }}</span>
                 <span class="p-tkn">{{ fmt(p.damageTaken) }}</span>
                 <span class="p-kda">{{ p.kills }}/{{ p.deaths }}/{{ p.assists }}</span>
               </div>
             </div>
 
-            <p class="score-note">{{ currentRule.id === "classic" ? "综合分 = 伤害 + 承伤 ÷ 2；按分组汇总" : currentRule.description }}</p>
+            <p class="score-note">{{ scoreDescription }}</p>
             <!-- 水印（截图时也带上） -->
             <div class="share-watermark">
               <span>{{ currentRule.name }}</span>
@@ -415,26 +416,34 @@ onUnmounted(() => {
           <span class="nav-title">设置</span>
         </div>
 
-        <p class="section-label">算分规则</p>
+        <p class="section-label">分组模式</p>
+        <div class="mode-toggle">
+          <button class="mode-btn" :class="{ active: battleMode === 'solo' }" @click="battleMode = 'solo'">匹配模式</button>
+          <button class="mode-btn" :class="{ active: battleMode === 'custom' }" @click="battleMode = 'custom'">自定义模式</button>
+        </div>
+
+        <p class="section-label" style="margin-top:16px">算分规则</p>
         <div class="rule-list">
           <label
-            v-for="r in RULES"
+            v-for="r in scoringRules"
             :key="r.id"
             class="rule-item"
-            :class="{ selected: currentRuleId === r.id }"
+            :class="{ selected: scoringMode === r.id }"
           >
-            <input type="radio" :value="r.id" v-model="currentRuleId" />
+            <input type="radio" name="scoring-rule" :value="r.id" :checked="scoringMode === r.id" @click="selectScoringRule(r.id)" />
             <div class="rule-body">
               <div class="rule-name">{{ r.name }}</div>
-              <div class="rule-desc">{{ r.description }}</div>
+              <div class="rule-desc"><span v-for="line in r.summary" :key="line">{{ line }}</span></div>
             </div>
           </label>
         </div>
 
+        <p v-if="scoringMode === 'lucky-number' && (activeLuckyDraw || pendingLuckyDraw)" class="approx-tip">幸运数字 <strong>{{ (activeLuckyDraw || pendingLuckyDraw)?.number }}</strong> · 已公开，本局固定</p>
+        <p v-if="luckyError" class="err">{{ luckyError }}</p>
         <p class="section-label" style="margin-top:16px">关于</p>
         <div class="about-box">
           <p class="about-line">LOL 红包局助手 <span v-if="appVersion">v{{ appVersion }}</span></p>
-          <p class="about-line muted">选英雄前启动，结算时自动显示结果</p>
+          <p class="about-line muted">对局结束自动显示结果，算分规则在设置中配置</p>
           <p class="about-line muted">关闭窗口后继续运行；托盘右键可退出。</p>
           <p class="about-line muted">下载新版：daguagua.top</p>
         </div>
@@ -709,7 +718,7 @@ body::before {
   margin-left: auto; font-variant-numeric: tabular-nums;
 }
 
-/* ────── 4人局模式切换 ────── */
+/* ────── 分组模式切换 ────── */
 .mode-toggle {
   display: flex;
   gap: 0;
@@ -888,6 +897,7 @@ body::before {
   letter-spacing: 0.3px;
 }
 .rule-desc { font-size: 11px; color: var(--muted); line-height: 1.5; }
+.rule-desc span { display: block; }
 
 .about-box {
   background: var(--surface);
@@ -910,4 +920,6 @@ body::before {
 .page.scrollable > * { flex-shrink: 0; }
 .page.scrollable .h-list { flex-shrink: 1; min-height: 0; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+.rank-tag { color: var(--primary-hi); font-size: 9px; margin-right: 5px; }
+.p-row.lowest-player .p-name { color: #FCA5A5; }
 </style>

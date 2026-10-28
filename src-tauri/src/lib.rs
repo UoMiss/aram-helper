@@ -1,15 +1,13 @@
 mod lcu;
 mod window_layout;
 
-use lcu::{GameResult, LcuConnection, MatchSummary};
+use lcu::{ActiveGame, GameResult, LcuConnection, MatchSummary};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// 应用状态
 pub struct AppState {
-    /// 选英雄阶段的楼层映射 (championId → floor 1-5)
-    pub champ_select_order: Mutex<HashMap<i64, usize>>,
     /// 本地存储路径
     pub history_path: Mutex<PathBuf>,
     /// 缓存的 LCU 连接凭证 (port, token)，避免每次命令都执行 wmic
@@ -62,11 +60,6 @@ fn save_game_result(state: &AppState, result: &GameResult) {
     // 文件锁保护
     let _lock = state.file_lock.lock().unwrap();
     let mut stored = load_stored_results(&path);
-    if let Some(existing) = stored.get(&result.game_id) {
-        if existing.has_accurate_floors && !result.has_accurate_floors {
-            return;
-        }
-    }
     stored.insert(result.game_id, result.clone());
     if let Ok(json) = serde_json::to_string(&stored) {
         let _ = std::fs::write(&path, json);
@@ -87,23 +80,17 @@ async fn get_gameflow_phase(state: tauri::State<'_, AppState>) -> Result<String,
     conn.get_gameflow_phase().await.map_err(|e| e.to_string())
 }
 
-/// 选英雄阶段抓取楼层顺序
 #[tauri::command]
-async fn capture_champ_select(state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn get_active_game(state: tauri::State<'_, AppState>) -> Result<Option<ActiveGame>, String> {
     let conn = get_connection(&state).await?;
-    let order = conn.get_champ_select_order().await.map_err(|e| e.to_string())?;
-    if !order.is_empty() {
-        *state.champ_select_order.lock().unwrap() = order;
-    }
-    Ok(())
+    conn.get_active_game().await.map_err(|e| e.to_string())
 }
 
-/// 获取最近一局结果（使用选英雄阶段楼层 + 自动存储到本地）
+/// 获取最近一局原始数据并自动存储到本地
 #[tauri::command]
-async fn get_damage_ranking(state: tauri::State<'_, AppState>) -> Result<GameResult, String> {
+async fn get_last_game_result(state: tauri::State<'_, AppState>) -> Result<GameResult, String> {
     let conn = get_connection(&state).await?;
-    let order = state.champ_select_order.lock().unwrap().clone();
-    let result = conn.get_last_game_result(&order).await.map_err(|e| e.to_string())?;
+    let result = conn.get_last_game_result().await.map_err(|e| e.to_string())?;
     save_game_result(&state, &result);
     Ok(result)
 }
@@ -123,11 +110,18 @@ async fn get_game_result(game_id: i64, state: tauri::State<'_, AppState>) -> Res
         let stored = load_stored_results(&path);
         drop(_lock);
         if let Some(result) = stored.get(&game_id) {
-            return Ok(result.clone());
+            let my_team = result.players.iter().find(|p| p.is_me).and_then(|p| p.team_id);
+            let has_both_teams = my_team.is_some()
+                && result.players.iter().any(|p| p.team_id.is_some() && p.team_id != my_team);
+            if result.players.iter().all(|p| p.team_id.is_some()) && has_both_teams {
+                return Ok(result.clone());
+            }
         }
     }
     let conn = get_connection(&state).await?;
-    conn.get_game_result(game_id, &HashMap::new()).await.map_err(|e| e.to_string())
+    let result = conn.get_game_result(game_id).await.map_err(|e| e.to_string())?;
+    save_game_result(&state, &result);
+    Ok(result)
 }
 
 /// 默认贴右上角；切换页面时保留拖动位置，并限制在当前显示器工作区内。
@@ -165,7 +159,6 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(AppState {
-            champ_select_order: Mutex::new(HashMap::new()),
             history_path: Mutex::new(PathBuf::new()),
             lcu_credentials: Mutex::new(None),
             file_lock: Mutex::new(()),
@@ -173,8 +166,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_connection,
             get_gameflow_phase,
-            capture_champ_select,
-            get_damage_ranking,
+            get_active_game,
+            get_last_game_result,
             get_match_list,
             get_game_result,
             resize_window
