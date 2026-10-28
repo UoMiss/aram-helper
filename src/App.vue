@@ -7,10 +7,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import html2canvas from "html2canvas-pro";
-import { groupPlayers } from "./grouping";
-import { damageTail, evaluateDamageTails, evaluateLuckyNumbers, DAMAGE_TAIL_DESCRIPTION, LUCKY_NUMBER_DESCRIPTION } from "./scoring";
+import { groupPlayers, detectBattleMode, displayMatchTeams } from "./grouping";
+import { damageTail, evaluateDamageTails, evaluateLuckyNumbers, payerCount, DAMAGE_TAIL_DESCRIPTION, LUCKY_NUMBER_DESCRIPTION } from "./scoring";
 
-import type { BattleMode, Player } from "./grouping";
+import type { Player } from "./grouping";
 
 const assistant = createAssistant(invoke, async () => {
   const window = getCurrentWindow();
@@ -20,56 +20,92 @@ const assistant = createAssistant(invoke, async () => {
   const window = getCurrentWindow();
   return await window.isVisible() && !await window.isMinimized();
 }, undefined, localStorage.getItem("scoringMode") === "lucky-number" ? "lucky-number" : "damage-tail");
-const { page, connStatus, summonerName, gamePhase, errorMsg, connectionError,
-  loading, historyLoading, connecting, gameResult, matchList, luckyDraws, currentGameId, luckyError, scoringMode, pendingLuckyDraw } = toRefs(assistant.state);
-const { viewLastGame, loadHistory, viewGame, goBack, openSettings, retryConnection, selectScoringRule } = assistant;
+const { page, connStatus, summonerName, gamePhase, currentIsCustomGame, errorMsg, connectionError,
+  loading, historyLoading, connecting, gameResult, matchList, friends, friendsLoading, friendsError, historyOwner, resultOwner, trial, trialError, luckyDraws, gameRules, rulesLocked, activeScoringMode, ruleSettingError, currentGameId, luckyError, scoringMode, configuredLuckyNumber, luckySettingError } = toRefs(assistant.state);
+const { viewLastGame, loadHistory, loadFriends, selectHistoryOwner, startTrial, stopTrial, setTrialRule, setTrialNumberInput, viewGame, goBack, openSettings, retryConnection, selectScoringRule, setLuckyNumberInput } = assistant;
 const appVersion = ref("");
 
-// 分组决定参与者；两种模式共用伤害尾数比较规则。
-const battleMode = ref<BattleMode>(localStorage.getItem("battleMode") === "custom" ? "custom" : "solo");
-watch(battleMode, (value) => localStorage.setItem("battleMode", value));
-const groupingLabel = computed(() => battleMode.value === "solo" ? "匹配模式" : "自定义模式");
-const playerGroups = computed(() => gameResult.value
-  ? groupPlayers(gameResult.value, battleMode.value)
-  : []);
-const canShowGroups = computed(() => playerGroups.value.length >= 2);
+// 结果始终使用这场对局的类型，不受当前房间和旧的手动设置影响。
+const battleMode = computed(() => gameResult.value ? detectBattleMode(gameResult.value) : null);
+const groupingLabel = computed(() => {
+  const mode = page.value === "result" ? battleMode.value : detectBattleMode({ isCustomGame: currentIsCustomGame.value });
+  return mode === "custom" ? "自定义模式" : mode === "solo" ? "匹配模式" : "自动识别对局类型";
+});
+const eligibleGroups = computed(() => gameResult.value ? groupPlayers(gameResult.value) : []);
+const playerGroups = computed(() => gameResult.value && resultOwner.value
+  ? displayMatchTeams(gameResult.value) : eligibleGroups.value);
+const canShowGroups = computed(() => resultOwner.value ? playerGroups.value.length > 0 : playerGroups.value.length >= 2);
+const participants = computed(() => eligibleGroups.value.flatMap(group => group.players));
+const paymentCount = computed(() => payerCount(participants.value.length));
+const groupingError = computed(() => !battleMode.value
+  ? "暂无法识别本局类型，请重新读取对局。"
+  : gameResult.value?.players.some((p) => p.teamId == null)
+    ? "缺少阵营数据，请重新读取对局。"
+    : battleMode.value === "solo" ? "自己和同队好友不足 2 人，无法比较。" : "缺少双方阵营数据，请重新读取对局。");
 const activeLuckyDraw = computed(() => {
   if (scoringMode.value !== "lucky-number") return null;
   if (currentGameId.value !== null) return luckyDraws.value[String(currentGameId.value)] ?? null;
-  return page.value === "status" ? pendingLuckyDraw.value : null;
+  return null;
 });
-const resultLuckyDraw = computed(() => gameResult.value ? luckyDraws.value[String(gameResult.value.gameId)] ?? null : null);
-const luckyResult = computed(() => evaluateLuckyNumbers(playerGroups.value.flatMap((group) => group.players), resultLuckyDraw.value?.number ?? null));
+const luckyInputLocked = rulesLocked;
+const luckyInputValue = computed(() => (currentGameId.value ? luckyDraws.value[String(currentGameId.value)]?.number : null)
+  ?? configuredLuckyNumber.value ?? "");
+function updateLuckyInput(event: Event) {
+  const input = event.target as HTMLInputElement;
+  if (!setLuckyNumberInput(input.value)) input.value = String(luckyInputValue.value);
+}
+const resultLuckyDraw = computed(() => resultOwner.value
+  ? trial.value?.mode === "lucky-number" && trial.value.number !== null ? { number: trial.value.number } : null
+  : gameResult.value ? luckyDraws.value[String(gameResult.value.gameId)] ?? null : null);
+function changeHistoryOwner(event: Event) { void selectHistoryOwner((event.target as HTMLSelectElement).value); }
+function updateTrialInput(event: Event) {
+  const input = event.target as HTMLInputElement;
+  if (!setTrialNumberInput(input.value)) input.value = String(trial.value?.number ?? "");
+}
+const luckyResult = computed(() => evaluateLuckyNumbers(participants.value, resultLuckyDraw.value?.number ?? null));
 watch(scoringMode, (mode) => localStorage.setItem("scoringMode", mode));
 const scoringRules = [
-  { id: "damage-tail" as const, name: "伤害尾数", summary: ["尾数越大排名越前，末位发红包。", "同分依次比较十位、百位等数值。"], description: DAMAGE_TAIL_DESCRIPTION },
-  { id: "lucky-number" as const, name: "幸运数字", summary: ["确认对局时抽取，距离越近越靠前。", "同分逐位比较距离，末位发红包。"], description: LUCKY_NUMBER_DESCRIPTION },
+  { id: "damage-tail" as const, name: "伤害尾数", summary: ["尾数越大越靠前，同分逐位比。"], description: DAMAGE_TAIL_DESCRIPTION },
+  { id: "lucky-number" as const, name: "幸运数字", summary: ["距离越近越靠前，同分逐位比。"], description: LUCKY_NUMBER_DESCRIPTION },
 ];
-const currentRule = computed(() => scoringRules.find((rule) => rule.id === scoringMode.value)!);
-const scoreDescription = computed(() => currentRule.value.description);
-const scoringResult = computed(() => scoringMode.value === "lucky-number"
-  ? luckyResult.value
-  : evaluateDamageTails(playerGroups.value.flatMap((group) => group.players)));
+const resultScoringMode = computed(() => resultOwner.value ? trial.value?.mode ?? null
+  : gameResult.value ? gameRules.value[String(gameResult.value.gameId)]?.mode ?? null : null);
+const displayedScoringMode = computed(() => page.value === "result" ? resultScoringMode.value
+  : rulesLocked.value ? activeScoringMode.value : scoringMode.value);
+const currentRule = computed(() => scoringRules.find((rule) => rule.id === displayedScoringMode.value)
+  ?? { name: resultOwner.value ? "好友战绩" : "规则未记录", description: resultOwner.value ? "" : "未记录本局开局时使用的红包规则，仅展示战绩。" });
+const scoreDescription = computed(() => trial.value?.mode === "lucky-number"
+  ? "手动试算：逐位比较伤害数字与所填幸运数字的距离，越接近越靠前；同分继续比较高位。"
+  : currentRule.value.description);
+const scoringResult = computed(() => resultScoringMode.value === null
+  ? { status: "missing-rule" as const, lowestPlayers: [] as Player[], tiedPlayers: [] as Player[] }
+  : resultScoringMode.value === "lucky-number" ? luckyResult.value : evaluateDamageTails(participants.value));
+const confirmedPayers = computed(() => scoringResult.value.lowestPlayers.filter(player => !scoringResult.value.tiedPlayers?.includes(player)));
 const resultMessage = computed(() => {
   const result = scoringResult.value;
   const names = result.lowestPlayers.map((player) => player.summonerName).join("、");
   if (result.status === "ready") return `发红包：${names}`;
-  if (result.status === "tie") return scoringMode.value === "lucky-number"
-    ? `末位并列：${names}。伤害各位与幸运数字的距离均相同，需手动确定。`
-    : `完全并列：${names}。完整伤害相同，需手动确定。`;
-  if (result.status === "missing") return "本局没有赛前公开的幸运数字，无法按此规则排名，不在结算后补抽。";
+  if (result.status === "tie") {
+    const confirmed = confirmedPayers.value.map(player => player.summonerName).join("、");
+    const tied = result.tiedPlayers?.map(player => player.summonerName).join("、");
+    return `${confirmed ? `已确定发红包：${confirmed}。` : ""}红包分界名次并列：${tied}，需手动选出 ${paymentCount.value - confirmedPayers.value.length} 人。`;
+  }
+  if (resultOwner.value && !trial.value) return "可点击上方「对局红包试算」，按当前红包规则计算。";
+  if (resultOwner.value && result.status === "missing") return "请填写本次试算的幸运数字（0～9）。";
+  if (result.status === "missing-rule") return "未记录本局开局规则，仅展示战绩，不使用当前设置重新判定红包。";
+  if (result.status === "missing") return "本局没有进入游戏时确认的幸运数字，无法按此规则排名，不在结算后补设。";
   if (result.status === "invalid") return "伤害数据不完整，暂不判定，请重新读取对局。";
   return "参与人数不足，暂不判定。";
 });
 
 const lowestNames = computed(() => scoringResult.value.lowestPlayers.map((player) => player.summonerName).join("、"));
 const displayedGroups = computed(() => {
-  if (scoringMode.value !== "lucky-number" || !luckyResult.value.ranking.length) return playerGroups.value;
+  if (resultScoringMode.value !== "lucky-number" || !luckyResult.value.ranking.length) return playerGroups.value;
   const ranks = new Map(luckyResult.value.ranking.map((entry) => [entry.player, entry.rank]));
   const groups = playerGroups.value.map((group) => ({ ...group,
-    players: [...group.players].sort((a, b) => ranks.get(a)! - ranks.get(b)!),
+    players: [...group.players].sort((a, b) => (ranks.get(a) ?? Infinity) - (ranks.get(b) ?? Infinity)),
   }));
-  return battleMode.value === "solo" ? groups.sort((a, b) => ranks.get(a.players[0])! - ranks.get(b.players[0])!) : groups;
+  return battleMode.value === "solo" && !resultOwner.value ? groups.sort((a, b) => ranks.get(a.players[0])! - ranks.get(b.players[0])!) : groups;
 });
 function playerRank(player: Player) {
   return luckyResult.value.ranking.find((entry) => entry.player === player)?.rank;
@@ -86,15 +122,15 @@ const appRoot = ref<HTMLElement>();
 
 function computeTargetHeight(): number {
   const updateHeight = updateState.value !== "idle" ? 48 : 0;
-  const luckyHeight = scoringMode.value === "lucky-number" && (activeLuckyDraw.value || luckyError.value) ? 58 : 0;
-  if (page.value === "status") return 420 + updateHeight + luckyHeight;
-  if (page.value === "history") return 580 + updateHeight;
-  if (page.value === "settings") return 540 + updateHeight + luckyHeight;
+  const luckyHeight = scoringMode.value === "lucky-number" ? 80 : 0;
+  if (page.value === "status") return 420 + updateHeight + luckyHeight + (scoringMode.value === "lucky-number" && luckySettingError.value ? 38 : 0);
+  if (page.value === "history") return 660 + updateHeight;
+  if (page.value === "settings") return 400 + updateHeight + (rulesLocked.value || ruleSettingError.value ? 40 : 0);
   if (page.value === "result" && gameResult.value) {
-    let h = 36 + 62 + 56 + updateHeight;
+    let h = 36 + 62 + 56 + updateHeight + (resultOwner.value ? trial.value ? 210 : 80 : 0);
     if (canShowGroups.value) {
       h += scoringResult.value.status === "ready" ? 110 : 60;
-      if (scoringMode.value === "lucky-number" && resultLuckyDraw.value) h += 42;
+      if (resultScoringMode.value === "lucky-number" && resultLuckyDraw.value) h += 42;
       for (const group of playerGroups.value) h += 84 + group.players.length * 24;
       h += 120;
     } else h += 100;
@@ -110,7 +146,7 @@ async function resizeToContent() {
   } catch {}
 }
 
-watch([page, playerGroups, battleMode, updateState, scoringMode, activeLuckyDraw, luckyError], () => {
+watch([page, playerGroups, battleMode, updateState, scoringMode, gameRules, rulesLocked, ruleSettingError, resultOwner, trial, trialError, activeLuckyDraw, luckyError, luckySettingError], () => {
   resizeToContent();
 });
 
@@ -130,7 +166,7 @@ function fmtTime(ts: number) {
 }
 function phaseText(p: string) {
   return ({ None:"大厅", Lobby:"房间中", Matchmaking:"匹配中", ReadyCheck:"确认中",
-    ChampSelect:"选英雄中", GameStart:"正在进入游戏", InProgress:"游戏中", WaitingForStats:"结算中", EndOfGame:"对局结束" } as Record<string,string>)[p] || p;
+    ChampSelect:"选英雄中", GameStart:"正在进入游戏", InProgress:"游戏中", Reconnect:"重新连接中", WaitingForStats:"结算中", PreEndOfGame:"结算中", EndOfGame:"对局结束" } as Record<string,string>)[p] || p;
 }
 function modeName(m: string) {
   return ({ ARAM:"大乱斗", KIWI:"大乱斗", CLASSIC:"匹配/排位", URF:"无限火力", CHERRY:"斗魂竞技场" } as Record<string,string>)[m] || m;
@@ -282,7 +318,7 @@ onUnmounted(() => {
         </div>
         <p class="title">LOL 红包局助手</p>
         <p class="sub">等待连接英雄联盟</p>
-        <p class="connection-guide">打开并登录客户端后会自动连接。<br />匹配模式比较自己和同队好友，自定义模式展示双方玩家。</p>
+        <p class="connection-guide">打开并登录客户端后会自动连接。<br />请在选英雄前启动助手，以记录准确分队。</p>
         <div class="dots"><i /><i /><i /></div>
         <div class="row" style="margin-top:16px">
           <button class="btn-s" @click="retryConnection" :disabled="connecting">{{ connecting ? "连接中…" : "重新连接" }}</button>
@@ -292,7 +328,7 @@ onUnmounted(() => {
         <details v-if="connectionError" class="connection-details"><summary>连接详情 · 每 5 秒自动重试</summary><p>{{ connectionError }}</p></details>
       </div>
 
-      <div v-else class="center-page">
+      <div v-else class="center-page connected-page">
         <div class="status-ring">
           <svg viewBox="0 0 64 64" width="48" height="48">
             <circle cx="32" cy="32" r="28" fill="none" stroke="#7C3AED" stroke-width="2" opacity="0.3"/>
@@ -300,17 +336,30 @@ onUnmounted(() => {
           </svg>
         </div>
         <p class="title">已连接</p>
-        <p class="name">{{ summonerName }}</p>
-        <p class="sub">{{ gamePhase ? phaseText(gamePhase) : "等待对局结束" }}</p>
-        <p class="rule-tag">{{ groupingLabel }} · {{ currentRule.name }}</p>
-        <p v-if="activeLuckyDraw" class="approx-tip">幸运数字 <strong>{{ activeLuckyDraw.number }}</strong> · 已公开</p>
-        <p v-if="luckyError" class="err">{{ luckyError }}</p>
-        <p class="connection-guide">{{ gamePhase === "WaitingForStats" ? "正在等待客户端生成结算数据…" : "对局结束自动结算，可以关闭窗口收进托盘。" }}</p>
-        <div class="dots"><i /><i /><i /></div>
-        <div class="row" style="margin-top:20px">
-          <button class="btn-s" @click="viewLastGame" :disabled="loading">
-            {{ loading ? "加载中" : "上一局" }}
-          </button>
+        <div class="summoner-line">
+          <p class="name" :title="summonerName">{{ summonerName }}</p>
+          <span class="phase-badge"><i />{{ gamePhase ? phaseText(gamePhase) : "等待对局" }}</span>
+        </div>
+        <div class="mode-summary"><span>{{ groupingLabel }}</span><span class="meta-dot">·</span><span>{{ currentRule.name }}</span></div>
+
+        <div v-if="scoringMode === 'lucky-number'" class="lucky-status" :class="{ confirmed: !!activeLuckyDraw, missing: !activeLuckyDraw && configuredLuckyNumber === null }" aria-live="polite">
+          <div class="lucky-status-copy">
+            <span class="lucky-status-title">本局幸运数字</span>
+            <strong class="lucky-status-state">{{ activeLuckyDraw ? "已确认" : luckyError ? "暂未确认" : configuredLuckyNumber === null ? "待填写" : "待确认" }}</strong>
+            <span class="lucky-status-hint">{{ activeLuckyDraw ? "本局已锁定" : configuredLuckyNumber === null ? luckyInputLocked ? "本局未填写数字" : "在右侧填写 0～9" : "进入游戏时自动确认" }}</span>
+          </div>
+          <form v-if="!luckyInputLocked" class="lucky-status-form" @submit.prevent>
+            <input id="lucky-number" class="lucky-status-input" type="text" inputmode="numeric" pattern="[0-9]"
+              placeholder="0～9" autocomplete="off" aria-label="本局幸运数字" :value="luckyInputValue"
+              :aria-describedby="luckySettingError ? 'lucky-number-error' : undefined" :aria-invalid="!!luckySettingError" @input="updateLuckyInput" />
+          </form>
+          <span v-else class="lucky-status-number">{{ activeLuckyDraw?.number ?? "—" }}</span>
+        </div>
+        <p v-if="scoringMode === 'lucky-number' && luckySettingError" id="lucky-number-error" class="err" role="alert">{{ luckySettingError }}</p>
+        <p v-if="luckyError" class="err" role="alert">{{ luckyError }}</p>
+        <p class="connection-guide">{{ gamePhase === "WaitingForStats" ? "正在等待客户端生成结算数据…" : "对局结束自动结算，关闭窗口可收进托盘。" }}</p>
+        <div class="status-actions">
+          <button class="btn-s" @click="viewLastGame" :disabled="loading">{{ loading ? "加载中…" : "上一局" }}</button>
           <button class="btn-s" @click="loadHistory">历史对局</button>
           <button class="btn-s" @click="openSettings">设置</button>
         </div>
@@ -327,22 +376,48 @@ onUnmounted(() => {
           <span class="nav-meta">{{ modeName(gameResult.gameMode) }} {{ fmtDur(gameResult.gameDuration) }}</span>
         </div>
 
+        <div v-if="resultOwner" class="friend-result-controls">
+          <p class="list-note">{{ resultOwner.displayName }} · 对局战绩</p>
+          <div class="friend-result-actions">
+            <button v-if="!trial" class="btn-s" @click="startTrial" :disabled="!battleMode || loading">对局红包试算</button>
+            <button class="btn-s" @click="viewGame(gameResult.gameId)" :disabled="loading">{{ loading ? "读取中…" : "重新读取" }}</button>
+          </div>
+          <p v-if="errorMsg" class="err" role="alert">{{ errorMsg }}</p>
+          <p v-if="!battleMode" class="sub">对局类型暂未识别，无法试算。</p>
+          <div v-if="trial" class="trial-panel">
+            <div class="trial-heading"><strong>手动试算</strong><button class="btn-s" @click="stopTrial">退出试算</button></div>
+            <div class="trial-rules" role="group" aria-label="试算红包规则">
+              <label v-for="r in scoringRules" :key="r.id" :class="{ selected: trial.mode === r.id }">
+                <input type="radio" name="trial-rule" :value="r.id" :checked="trial.mode === r.id" @change="setTrialRule(r.id)" />{{ r.name }}
+              </label>
+            </div>
+            <label v-if="trial.mode === 'lucky-number'" class="trial-number-label">幸运数字
+              <input class="trial-number" type="text" inputmode="numeric" pattern="[0-9]" placeholder="0～9" aria-label="试算幸运数字"
+                :value="trial.number ?? ''" :aria-invalid="!!trialError" @input="updateTrialInput" />
+            </label>
+            <p class="sub">仅用于历史试算，不更改本局开局记录。</p>
+          </div>
+          <p v-if="trialError" class="err" role="alert">{{ trialError }}</p>
+        </div>
+
         <div v-if="!canShowGroups" class="center-page" style="padding:24px 0">
-          <p class="sub">{{ battleMode === "solo" ? "自己和同队好友不足 2 人，无法比较" : "缺少双方阵营数据，请重新读取对局" }}</p>
+          <p class="sub">{{ groupingError }}</p>
+          <button class="btn-s" style="margin-top:12px" @click="viewGame(gameResult.gameId)" :disabled="loading">{{ loading ? "读取中…" : "重新读取" }}</button>
+          <p v-if="errorMsg" class="err">{{ errorMsg }}</p>
         </div>
 
         <template v-else>
-          <div class="mode-toggle" aria-label="分组模式">
-            <button class="mode-btn" :class="{ active: battleMode === 'solo' }" @click="battleMode = 'solo'">匹配模式</button>
-            <button class="mode-btn" :class="{ active: battleMode === 'custom' }" @click="battleMode = 'custom'">自定义模式</button>
-          </div>
-
           <!-- 截图区域 -->
           <div ref="resultArea" class="share-area">
-            <p v-if="scoringMode === 'lucky-number' && resultLuckyDraw" class="approx-tip">幸运数字 <strong>{{ resultLuckyDraw.number }}</strong> · 赛前已公开</p>
+            <p class="rule-tag">{{ groupingLabel }} · {{ resultOwner ? trial ? "手动试算" : "好友战绩" : "自动识别" }}</p>
+            <p v-if="trial" class="trial-disclaimer">手动试算 · {{ currentRule.name }} · 非开局确认结果</p>
+            <p v-if="trial" class="list-note">{{ battleMode === 'custom' ? "双方所有玩家参与" : "所选好友＋你的同队好友；本人同队也计入" }}</p>
+            <p v-if="trial && participants.length" class="trial-participants">参与试算：{{ participants.map(p => p.summonerName).join('、') }}</p>
+            <p v-if="resultScoringMode && paymentCount" class="payout-note">本局 {{ participants.length }} 人参与 · 最后 {{ paymentCount }} 名发红包</p>
+            <p v-if="resultScoringMode === 'lucky-number' && resultLuckyDraw" class="approx-tip">幸运数字 <strong>{{ resultLuckyDraw.number }}</strong> · {{ trial ? "手动输入" : "本局已锁定" }}</p>
             <div v-if="scoringResult.status === 'ready'" class="loser-box">
               <div class="loser-name">{{ lowestNames }}</div>
-              <div class="loser-slogan">就是你了，发红包吧！</div>
+              <div class="loser-slogan">{{ trial ? "试算结果 · 以上玩家发红包" : paymentCount === 1 ? "就是你了，发红包吧！" : "本局最后两名，发红包吧！" }}</div>
             </div>
             <p v-else class="approx-tip" role="status">{{ resultMessage }}</p>
 
@@ -350,22 +425,22 @@ onUnmounted(() => {
               v-for="(team, i) in displayedGroups"
               :key="i"
               class="team"
-              :class="{ lose: battleMode === 'solo' && team.players.some(p => scoringResult.lowestPlayers.includes(p)) }"
+              :class="{ lose: !resultOwner && battleMode === 'solo' && team.players.some(p => confirmedPayers.includes(p)) }"
             >
               <div class="team-top">
                 <span class="team-name" :title="team.name">{{ team.name }}</span>
                 <span class="team-pts">{{ team.players.length === 1 ? `${damageTail(team.players[0].damage) ?? "—"} 尾数` : `${team.players.length} 人` }}</span>
               </div>
               <div class="p-row p-head"><span class="p-name">玩家</span><span class="p-dmg">伤害</span><span class="p-tkn">承伤</span><span class="p-kda">K / D / A</span></div>
-              <div v-for="p in team.players" :key="p.summonerName" class="p-row" :class="{ 'lowest-player': scoringResult.lowestPlayers.includes(p) }">
-                <span class="p-name" :title="p.summonerName"><b v-if="scoringMode === 'lucky-number' && playerRank(p)" class="rank-tag">#{{ playerRank(p) }}</b>{{ p.summonerName }}<b v-if="p.isMe" class="me-tag">我</b></span>
+              <div v-for="(p, playerIndex) in team.players" :key="p.participantId || playerIndex" class="p-row" :class="{ 'lowest-player': confirmedPayers.includes(p) }">
+                <span class="p-name" :title="p.summonerName"><b v-if="resultScoringMode === 'lucky-number' && playerRank(p)" class="rank-tag">#{{ playerRank(p) }}</b>{{ p.summonerName }}<b v-if="p.isMe" class="me-tag">我</b><b v-if="resultOwner && p.isHistoryOwner" class="me-tag">查看对象</b></span>
                 <span class="p-dmg">{{ fmt(p.damage) }}</span>
                 <span class="p-tkn">{{ fmt(p.damageTaken) }}</span>
                 <span class="p-kda">{{ p.kills }}/{{ p.deaths }}/{{ p.assists }}</span>
               </div>
             </div>
 
-            <p class="score-note">{{ scoreDescription }}</p>
+            <p v-if="scoreDescription" class="score-note">{{ scoreDescription }}</p>
             <!-- 水印（截图时也带上） -->
             <div class="share-watermark">
               <span>{{ currentRule.name }}</span>
@@ -392,12 +467,24 @@ onUnmounted(() => {
           <span class="nav-title">历史对局</span>
         </div>
 
+        <div class="history-owner">
+          <label for="history-owner">查看战绩</label>
+          <select id="history-owner" :value="historyOwner?.puuid ?? ''" @change="changeHistoryOwner">
+            <option value="">我自己</option>
+            <option v-if="historyOwner && !friends.some(f => f.puuid === historyOwner?.puuid)" :value="historyOwner.puuid">{{ historyOwner.displayName }}</option>
+            <option v-for="friend in friends" :key="friend.puuid" :value="friend.puuid">{{ friend.displayName }}</option>
+          </select>
+          <button class="btn-s" @click="loadFriends" :disabled="friendsLoading">{{ friendsLoading ? "加载中…" : "刷新好友" }}</button>
+        </div>
+        <p v-if="friendsError" class="err" role="alert">{{ friendsError }}</p>
+        <p v-else-if="!friendsLoading && !friends.length" class="list-note">暂未找到可查询战绩的好友，仍可查看自己的对局。</p>
+
         <p v-if="historyLoading" class="sub" style="text-align:center;padding:24px">加载中...</p>
 
         <div v-else-if="errorMsg" class="empty-state" role="alert"><p>{{ errorMsg }}</p><button class="btn-s" @click="loadHistory">重新加载</button></div>
         <div v-else-if="!matchList.length" class="empty-state"><p>还没有可显示的对局</p><p class="sub">完成一局游戏后，再来查看最近 20 局。</p><button class="btn-s" @click="loadHistory">刷新记录</button></div>
         <div v-else class="h-list" :aria-busy="loading">
-          <p class="list-note" role="status">{{ loading ? "正在读取对局详情…" : "最近 20 局 · 点击查看结算" }}</p>
+          <p class="list-note" role="status">{{ loading ? "正在读取对局详情…" : (historyOwner ? "最近 20 局 · 查看战绩与红包试算" : "最近 20 局 · 点击查看结算") }}</p>
           <button v-for="m in matchList" :key="m.gameId" class="h-item" @click="viewGame(m.gameId)" :disabled="loading">
             <span class="h-mode">{{ modeName(m.gameMode) }}</span>
             <span class="h-dur">{{ fmtDur(m.gameDuration) }}</span>
@@ -416,36 +503,26 @@ onUnmounted(() => {
           <span class="nav-title">设置</span>
         </div>
 
-        <p class="section-label">分组模式</p>
-        <div class="mode-toggle">
-          <button class="mode-btn" :class="{ active: battleMode === 'solo' }" @click="battleMode = 'solo'">匹配模式</button>
-          <button class="mode-btn" :class="{ active: battleMode === 'custom' }" @click="battleMode = 'custom'">自定义模式</button>
-        </div>
-
-        <p class="section-label" style="margin-top:16px">算分规则</p>
+        <p class="section-label">红包规则</p>
         <div class="rule-list">
-          <label
-            v-for="r in scoringRules"
-            :key="r.id"
-            class="rule-item"
-            :class="{ selected: scoringMode === r.id }"
-          >
-            <input type="radio" name="scoring-rule" :value="r.id" :checked="scoringMode === r.id" @click="selectScoringRule(r.id)" />
-            <div class="rule-body">
-              <div class="rule-name">{{ r.name }}</div>
-              <div class="rule-desc"><span v-for="line in r.summary" :key="line">{{ line }}</span></div>
-            </div>
-          </label>
+          <div v-for="r in scoringRules" :key="r.id" class="rule-item" :class="{ selected: scoringMode === r.id }">
+            <label class="rule-choice">
+              <input type="radio" name="scoring-rule" :value="r.id" :checked="scoringMode === r.id" :disabled="rulesLocked" @click="selectScoringRule(r.id)" />
+              <div class="rule-body">
+                <div class="rule-name">{{ r.name }}</div>
+                <div class="rule-desc"><span v-for="line in r.summary" :key="line">{{ line }}</span></div>
+              </div>
+            </label>
+          </div>
         </div>
 
-        <p v-if="scoringMode === 'lucky-number' && (activeLuckyDraw || pendingLuckyDraw)" class="approx-tip">幸运数字 <strong>{{ (activeLuckyDraw || pendingLuckyDraw)?.number }}</strong> · 已公开，本局固定</p>
-        <p v-if="luckyError" class="err">{{ luckyError }}</p>
+        <p v-if="rulesLocked || ruleSettingError" class="approx-tip" role="status">{{ ruleSettingError || "本局红包规则已锁定，对局结束后可修改。" }}</p>
+
         <p class="section-label" style="margin-top:16px">关于</p>
         <div class="about-box">
           <p class="about-line">LOL 红包局助手 <span v-if="appVersion">v{{ appVersion }}</span></p>
-          <p class="about-line muted">对局结束自动显示结果，算分规则在设置中配置</p>
+          <p class="about-line muted">对局结束自动显示结果，红包规则在设置中配置</p>
           <p class="about-line muted">关闭窗口后继续运行；托盘右键可退出。</p>
-          <p class="about-line muted">下载新版：daguagua.top</p>
         </div>
       </div>
     </template>
@@ -565,6 +642,7 @@ body::before {
   background: var(--bg);
   padding: 2px 0;
 }
+.payout-note { margin: 10px 0; color: var(--muted); font-size: 11px; text-align: center; }
 .share-watermark {
   margin-top: 12px;
   text-align: center;
@@ -606,6 +684,38 @@ body::before {
   flex: 1; display: flex; flex-direction: column;
   align-items: center; justify-content: center; text-align: center;
 }
+
+.connected-page { padding: 18px 8px; }
+.connected-page > * { flex-shrink: 0; }
+.connected-page .status-ring { margin-bottom: 12px; }
+.connected-page .title { font-size: 21px; margin-bottom: 10px; }
+.summoner-line { display: flex; align-items: center; justify-content: center; gap: 10px; max-width: 100%; }
+.summoner-line .name { font-size: 14px; margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.phase-badge { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; padding: 3px 7px; border-radius: 5px; color: var(--text-2); background: var(--surface); font-size: 10px; }
+.phase-badge i { width: 5px; height: 5px; border-radius: 50%; background: #34d399; }
+.mode-summary { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 12px; color: var(--muted); font-size: 11px; }
+.meta-dot { color: var(--border-light); }
+.lucky-status { width: 100%; max-width: 320px; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 20px; padding: 14px 20px; text-align: left; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.lucky-status-copy { display: flex; flex-direction: column; gap: 5px; }
+.lucky-status-title { font-size: 11px; color: var(--muted); }
+.lucky-status-state { font-size: 15px; color: var(--text); font-weight: 600; }
+.lucky-status-hint { font-size: 10px; color: var(--muted); }
+.lucky-status-number { font-family: var(--font-display); font-size: 48px; font-weight: 700; line-height: 1; color: var(--primary-hi); font-variant-numeric: tabular-nums; }
+.lucky-status-form { flex: 0 0 82px; }
+.lucky-status-input {
+  width: 82px; height: 66px; padding: 4px; border: 1px solid var(--border-light); border-radius: 10px;
+  background: var(--surface-2); color: var(--primary-hi); text-align: center;
+  font: 700 38px/1 var(--font-display); font-variant-numeric: tabular-nums;
+}
+.lucky-status-input::placeholder { color: var(--muted); font-size: 20px; font-weight: 400; }
+.lucky-status-input:focus { outline: 2px solid var(--primary); outline-offset: 2px; }
+.lucky-status-input[aria-invalid="true"] { border-color: var(--danger); }
+.lucky-status.confirmed { border-color: rgba(245,158,11,0.35); background: linear-gradient(110deg, rgba(245,158,11,0.07), var(--surface)); }
+.lucky-status.confirmed .lucky-status-state, .lucky-status.confirmed .lucky-status-number { color: var(--gold); }
+.lucky-status.missing .lucky-status-number { color: var(--muted); }
+.connected-page .connection-guide { max-width: 320px; margin-top: 16px; font-size: 10px; }
+.status-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; width: 100%; max-width: 320px; margin-top: 20px; }
+.status-actions .btn-s { min-width: 0; padding: 9px 4px; }
 
 .brand-logo, .status-ring {
   margin-bottom: 16px;
@@ -718,36 +828,7 @@ body::before {
   margin-left: auto; font-variant-numeric: tabular-nums;
 }
 
-/* ────── 分组模式切换 ────── */
-.mode-toggle {
-  display: flex;
-  gap: 0;
-  margin-bottom: 10px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 3px;
-}
-.mode-btn {
-  flex: 1;
-  padding: 7px 0;
-  border: none;
-  background: transparent;
-  color: var(--muted);
-  font-family: var(--font-display);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  cursor: pointer;
-  border-radius: 5px;
-  transition: all 0.2s ease;
-}
-.mode-btn:hover:not(.active) { color: var(--text-2); }
-.mode-btn.active {
-  background: var(--primary);
-  color: #fff;
-  box-shadow: 0 2px 8px var(--primary-glow);
-}
+.rule-choice { display: flex; align-items: flex-start; gap: 10px; flex: 1; min-width: 0; cursor: pointer; }
 
 .approx-tip {
   font-size: 11px; color: var(--gold);
@@ -870,6 +951,7 @@ body::before {
 .rule-list { display: flex; flex-direction: column; gap: 6px; }
 
 .rule-item {
+  flex-wrap: wrap;
   display: flex; align-items: flex-start; gap: 10px;
   padding: 12px;
   background: var(--surface);
@@ -922,4 +1004,25 @@ body::before {
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 .rank-tag { color: var(--primary-hi); font-size: 9px; margin-right: 5px; }
 .p-row.lowest-player .p-name { color: #FCA5A5; }
+</style>
+
+<style scoped>
+.history-owner { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-shrink: 0; }
+.history-owner label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.history-owner select { min-width: 0; flex: 1; width: 0; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+.history-owner .btn-s { white-space: nowrap; font-size: 11px; padding: 7px 9px; }
+.friend-result-actions { display: flex; gap: 8px; margin-bottom: 10px; }
+.friend-result-controls { margin: 0 0 16px; flex-shrink: 0; }
+.trial-panel { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--surface); }
+.trial-heading { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+.trial-heading .btn-s { font-size: 10px; padding: 4px 8px; }
+.trial-rules { display: flex; gap: 8px; margin: 12px 0; }
+.trial-rules label { flex: 1; display: flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 11px; cursor: pointer; }
+.trial-rules label.selected { border-color: var(--primary-hi); }
+.trial-rules input { accent-color: var(--primary-hi); }
+.trial-number-label { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; font-size: 11px; }
+.trial-number { width: 64px; padding: 7px; text-align: center; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--bg); }
+.trial-panel .sub { font-size: 10px; }
+.trial-disclaimer { color: var(--gold); font-size: 11px; margin: 8px 0; }
+.trial-participants { color: var(--muted); font-size: 10px; margin-bottom: 8px; overflow-wrap: anywhere; }
 </style>

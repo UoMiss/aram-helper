@@ -1,7 +1,7 @@
 mod lcu;
 mod window_layout;
 
-use lcu::{ActiveGame, GameResult, LcuConnection, MatchSummary};
+use lcu::{ActiveGame, FriendSummary, GameResult, LcuConnection, MatchSummary};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -81,6 +81,12 @@ async fn get_gameflow_phase(state: tauri::State<'_, AppState>) -> Result<String,
 }
 
 #[tauri::command]
+async fn get_current_game_type(state: tauri::State<'_, AppState>) -> Result<Option<bool>, String> {
+    let conn = get_connection(&state).await?;
+    conn.get_current_game_type().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_active_game(state: tauri::State<'_, AppState>) -> Result<Option<ActiveGame>, String> {
     let conn = get_connection(&state).await?;
     conn.get_active_game().await.map_err(|e| e.to_string())
@@ -101,6 +107,25 @@ async fn get_match_list(state: tauri::State<'_, AppState>) -> Result<Vec<MatchSu
     conn.get_match_list(20).await.map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn get_friends(state: tauri::State<'_, AppState>) -> Result<Vec<FriendSummary>, String> {
+    let conn = get_connection(&state).await?;
+    conn.get_friends().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_friend_match_list(puuid: String, state: tauri::State<'_, AppState>) -> Result<Vec<MatchSummary>, String> {
+    let conn = get_connection(&state).await?;
+    conn.get_friend_match_list(&puuid, 20).await.map_err(|e| e.to_string())
+}
+
+// 好友详情按当前登录账号的好友关系读取，不写入或复用自己的战绩缓存。
+#[tauri::command]
+async fn get_friend_game_result(game_id: i64, puuid: String, state: tauri::State<'_, AppState>) -> Result<GameResult, String> {
+    let conn = get_connection(&state).await?;
+    conn.get_friend_game_result(game_id, &puuid).await.map_err(|e| e.to_string())
+}
+
 /// 获取指定对局结果（优先从本地存储读取）
 #[tauri::command]
 async fn get_game_result(game_id: i64, state: tauri::State<'_, AppState>) -> Result<GameResult, String> {
@@ -113,7 +138,7 @@ async fn get_game_result(game_id: i64, state: tauri::State<'_, AppState>) -> Res
             let my_team = result.players.iter().find(|p| p.is_me).and_then(|p| p.team_id);
             let has_both_teams = my_team.is_some()
                 && result.players.iter().any(|p| p.team_id.is_some() && p.team_id != my_team);
-            if result.players.iter().all(|p| p.team_id.is_some()) && has_both_teams {
+            if result.is_custom_game.is_some() && result.players.iter().all(|p| p.team_id.is_some()) && has_both_teams {
                 return Ok(result.clone());
             }
         }
@@ -166,9 +191,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_connection,
             get_gameflow_phase,
+            get_current_game_type,
             get_active_game,
             get_last_game_result,
             get_match_list,
+            get_friends,
+            get_friend_match_list,
+            get_friend_game_result,
             get_game_result,
             resize_window
         ])

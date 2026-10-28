@@ -8,7 +8,7 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "node --experimental-strip-types --test 测试/官网下载.test.mjs 测试/下载构建.test.mjs 测试/页面轮询.test.mjs 测试/分组.test.mjs 测试/评分.test.mjs 测试/幸运数字.test.mjs",
+    "test": "node --experimental-strip-types --test 测试/官网下载.test.mjs 测试/下载构建.test.mjs 测试/页面轮询.test.mjs 测试/分组.test.mjs 测试/评分.test.mjs 测试/幸运数字.test.mjs 测试/好友战绩.test.mjs",
     "prepare:download": "node 脚本/准备官网下载.mjs"
   },
   "dependencies": {

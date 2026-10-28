@@ -4,7 +4,11 @@ export function damageTail(damage: number): number | null {
   return damage % 10;
 }
 
-export const DAMAGE_TAIL_DESCRIPTION = "伤害尾数：取精确对英雄伤害的个位数，9 最大、0 最小；相同则依次比较十位、百位及更高位，较小者发红包。";
+export const DAMAGE_TAIL_DESCRIPTION = "伤害尾数：取精确对英雄伤害的个位数，9 最大、0 最小；相同则依次比较十位、百位及更高位。";
+
+export function payerCount(participantCount: number): number {
+  return participantCount < 2 ? 0 : participantCount < 4 ? 1 : 2;
+}
 
 // 从低位向高位逐位比较；高位不足时视为 0。
 export function compareDamageTails(a: number, b: number): number {
@@ -23,6 +27,21 @@ export function compareDamageTails(a: number, b: number): number {
 export interface DamageTailResult<T> {
   status: "ready" | "tie" | "insufficient" | "invalid";
   lowestPlayers: T[];
+  tiedPlayers?: T[];
+}
+
+// compare 小于 0 表示排名更靠前；并列只在跨越红包名额边界时需要手动决定。
+function selectPayers<T>(players: T[], compare: (a: T, b: T) => number): DamageTailResult<T> {
+  const count = payerCount(players.length);
+  const sorted = [...players].sort(compare);
+  const cutoff = sorted[sorted.length - count];
+  const lowestPlayers = players.filter(player => compare(player, cutoff) >= 0);
+  const tied = lowestPlayers.length > count;
+  return {
+    status: tied ? "tie" : "ready",
+    lowestPlayers,
+    tiedPlayers: tied ? players.filter(player => compare(player, cutoff) === 0) : [],
+  };
 }
 
 // 传入当前模式的全部参与者；阵营不参与评分。
@@ -31,17 +50,11 @@ export function evaluateDamageTails<T extends { damage: number }>(players: T[]):
   if (players.some((player) => damageTail(player.damage) === null)) {
     return { status: "invalid", lowestPlayers: [] };
   }
-  let lowestPlayers = [players[0]];
-  for (const player of players.slice(1)) {
-    const comparison = compareDamageTails(player.damage, lowestPlayers[0].damage);
-    if (comparison < 0) lowestPlayers = [player];
-    else if (comparison === 0) lowestPlayers.push(player);
-  }
-  return { status: lowestPlayers.length === 1 ? "ready" : "tie", lowestPlayers };
+  return selectPayers(players, (a, b) => -compareDamageTails(a.damage, b.damage));
 }
 
 export type ScoringMode = "damage-tail" | "lucky-number";
-export const LUCKY_NUMBER_DESCRIPTION = "幸运数字：启用后每局确认对局时公开抽取 0～9，本局固定；伤害个位与幸运数字的绝对差越小，排名越靠前。个位距离相同则继续比较十位、百位及更高位与幸运数字的距离；每位都是越接近越靠前，高位不足按 0，所有位距离都相同则并列。";
+export const LUCKY_NUMBER_DESCRIPTION = "幸运数字：由用户在连接成功首页填写 0～9，进入游戏时确认锁定，每局结束后需重新填写；伤害个位与幸运数字的绝对差越小，排名越靠前。个位距离相同则继续比较十位、百位及更高位与幸运数字的距离；每位都是越接近越靠前，高位不足按 0，所有位距离都相同则并列。";
 export interface LuckyRank<T> {
   player: T;
   rank: number;
@@ -51,6 +64,7 @@ export interface LuckyRank<T> {
 export function evaluateLuckyNumbers<T extends { damage: number }>(players: T[], lucky: number | null): {
   status: DamageTailResult<T>["status"] | "missing";
   lowestPlayers: T[];
+  tiedPlayers?: T[];
   ranking: LuckyRank<T>[];
 } {
   if (players.length < 2) return { status: "insufficient", lowestPlayers: [], ranking: [] };
@@ -74,7 +88,5 @@ export function evaluateLuckyNumbers<T extends { damage: number }>(players: T[],
     if (index > 0 && compare(player, sorted[index - 1]) !== 0) rank = index + 1;
     return { player, rank, tail: player.damage % 10, distance: Math.abs(player.damage % 10 - lucky) };
   });
-  const last = sorted[sorted.length - 1];
-  const lowestPlayers = sorted.filter((player) => compare(player, last) === 0);
-  return { status: lowestPlayers.length === 1 ? "ready" : "tie", lowestPlayers, ranking };
+  return { ...selectPayers(players, compare), ranking };
 }

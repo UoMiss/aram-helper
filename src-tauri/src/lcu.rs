@@ -14,6 +14,8 @@ pub struct LcuConnection {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerData {
+    #[serde(default)]
+    pub participant_id: i64,
     pub summoner_name: String,
     pub champion_id: i64,
     #[serde(default)]
@@ -26,6 +28,8 @@ pub struct PlayerData {
     pub assists: i64,
     pub is_friend: bool,
     pub is_me: bool,
+    #[serde(default)]
+    pub is_history_owner: bool,
 }
 
 /// 对局原始数据（由前端选择参与者和分组）
@@ -34,9 +38,20 @@ pub struct PlayerData {
 pub struct GameResult {
     pub game_id: i64,
     pub game_mode: String,
+    #[serde(default)]
+    pub is_custom_game: Option<bool>,
     pub game_duration: i64,
     pub timestamp: i64,
     pub players: Vec<PlayerData>, // 双方玩家；前端根据模式分组
+    #[serde(default)]
+    pub history_owner_puuid: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FriendSummary {
+    pub puuid: String,
+    pub display_name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -211,14 +226,69 @@ impl LcuConnection {
         Ok(data.as_str().unwrap_or("None").to_string())
     }
 
-    /// 使用同一会话快照读取阶段和对局编号，避免结束后补抽。
+    /// 当前会话的类型仅用于状态展示；历史结算独立读取自身类型。
+    pub async fn get_current_game_type(&self) -> Result<Option<bool>, Box<dyn std::error::Error + Send + Sync>> {
+        let session = self.api("/lol-gameflow/v1/session").await?;
+        if session["phase"].as_str() == Some("None") { return Ok(None); }
+        Ok(session["gameData"]["isCustomGame"].as_bool()
+            .or_else(|| session["gameData"]["queue"]["isCustom"].as_bool()))
+    }
+
+    async fn resolve_result_game_type(&self, details: &serde_json::Value) -> Option<bool> {
+        match details["gameType"].as_str() {
+            Some("CUSTOM_GAME") => return Some(true),
+            Some("MATCHED_GAME") => return Some(false),
+            // 教学等特殊类型不参与红包结算。
+            Some(kind) if !kind.is_empty() => return None,
+            _ => {}
+        }
+        let queue_id = details["queueId"].as_i64().filter(|id| *id >= 0)?;
+        // 缺少 gameType 时向客户端查询队列，不能把未知编号当作匹配。
+        self.api(&format!("/lol-game-queues/v1/queues/{}/isCustom", queue_id))
+            .await.ok()?.as_bool()
+    }
+
+    /// 使用同一会话快照读取阶段和编号；结算阶段可用于恢复本局，前端不会补设规则。
     pub async fn get_active_game(&self) -> Result<Option<ActiveGame>, Box<dyn std::error::Error + Send + Sync>> {
         let session = self.api("/lol-gameflow/v1/session").await?;
         let phase = session["phase"].as_str().unwrap_or("");
-        if !matches!(phase, "GameStart" | "InProgress" | "Reconnect") { return Ok(None); }
+        if !matches!(phase, "GameStart" | "InProgress" | "Reconnect" | "WaitingForStats" | "PreEndOfGame" | "EndOfGame") { return Ok(None); }
         let game_id = session["gameData"]["gameId"].as_i64().filter(|id| *id > 0)
             .ok_or("本局对局编号尚未就绪")?;
         Ok(Some(ActiveGame { game_id, phase: phase.to_string() }))
+    }
+
+    /// 好友选择使用完整列表；读取失败必须显式报错，不能伪装为空名单。
+    pub async fn get_friends(&self) -> Result<Vec<FriendSummary>, Box<dyn std::error::Error + Send + Sync>> {
+        let data = self.api("/lol-chat/v1/friends").await?;
+        let items = data.as_array().ok_or("好友列表格式不完整")?;
+        let mut seen = HashSet::new();
+        let mut friends = Vec::new();
+        for item in items {
+            let Some(puuid) = item["puuid"].as_str().filter(|id| !id.is_empty()) else { continue; };
+            if !seen.insert(puuid.to_string()) { continue; }
+            let name = item["gameName"].as_str().filter(|name| !name.is_empty())
+                .or_else(|| item["name"].as_str().filter(|name| !name.is_empty())).unwrap_or("未命名好友");
+            let tag = item["gameTag"].as_str().filter(|tag| !tag.is_empty());
+            friends.push(FriendSummary { puuid: puuid.to_string(),
+                display_name: tag.map(|tag| format!("{}#{}", name, tag)).unwrap_or_else(|| name.to_string()) });
+        }
+        friends.sort_by(|a, b| a.display_name.cmp(&b.display_name).then(a.puuid.cmp(&b.puuid)));
+        Ok(friends)
+    }
+
+    async fn checked_friend_ids(&self, puuid: &str) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+        if puuid.is_empty() || puuid.len() > 128 || !puuid.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
+            return Err("好友标识无效，请刷新好友列表".into());
+        }
+        let ids: HashSet<String> = self.get_friends().await?.into_iter().map(|friend| friend.puuid).collect();
+        if !ids.contains(puuid) { return Err("该玩家已不在好友列表，请刷新后重选".into()); }
+        Ok(ids)
+    }
+
+    pub async fn get_friend_match_list(&self, puuid: &str, count: usize) -> Result<Vec<MatchSummary>, Box<dyn std::error::Error + Send + Sync>> {
+        self.checked_friend_ids(puuid).await?;
+        self.read_match_list(puuid, count).await
     }
 
     async fn get_friend_puuids(&self) -> HashSet<String> {
@@ -236,6 +306,10 @@ impl LcuConnection {
         let summoner = self.api("/lol-summoner/v1/current-summoner").await?;
         let puuid = summoner["puuid"].as_str().ok_or("无法获取 PUUID")?;
 
+        self.read_match_list(puuid, count).await
+    }
+
+    async fn read_match_list(&self, puuid: &str, count: usize) -> Result<Vec<MatchSummary>, Box<dyn std::error::Error + Send + Sync>> {
         let history = self.api(
             &format!("/lol-match-history/v1/products/lol/{}/matches?begIndex=0&endIndex={}", puuid, count)
         ).await?;
@@ -283,10 +357,25 @@ impl LcuConnection {
         let my_puuid = summoner["puuid"].as_str().ok_or("无法获取 PUUID")?.to_string();
 
         let friend_puuids = self.get_friend_puuids().await;
+        self.read_game_result(game_id, &my_puuid, None, &friend_puuids).await
+    }
 
+    pub async fn get_friend_game_result(&self, game_id: i64, puuid: &str) -> Result<GameResult, Box<dyn std::error::Error + Send + Sync>> {
+        let friend_puuids = self.checked_friend_ids(puuid).await?;
+        let summoner = self.api("/lol-summoner/v1/current-summoner").await?;
+        let my_puuid = summoner["puuid"].as_str().ok_or("无法获取当前玩家 PUUID")?;
+        self.read_game_result(game_id, my_puuid, Some(puuid), &friend_puuids).await
+    }
+
+    async fn read_game_result(&self, game_id: i64, my_puuid: &str, history_owner: Option<&str>, friend_puuids: &HashSet<String>) -> Result<GameResult, Box<dyn std::error::Error + Send + Sync>> {
         let details = self.api(&format!("/lol-match-history/v1/games/{}", game_id)).await?;
 
+        if details["gameId"].as_i64() != Some(game_id) {
+            return Err("对局数据编号不一致，等待本局战绩生成".into());
+        }
+
         let game_mode = details["gameMode"].as_str().unwrap_or("").to_string();
+        let is_custom_game = self.resolve_result_game_type(&details).await;
         let game_duration = details["gameDuration"].as_i64().unwrap_or(0);
         let timestamp = details["gameCreation"].as_i64().unwrap_or(0);
 
@@ -307,23 +396,25 @@ impl LcuConnection {
         }
 
         // 保存双方玩家与阵营，让分组模式独立选择参与者。
-        if !puuid_map.values().any(|v| v == &my_puuid) {
-            return Err("无法找到当前玩家".into());
+        let required_player = history_owner.unwrap_or(my_puuid);
+        if !puuid_map.values().any(|v| v == required_player) {
+            return Err("对局中未找到所选玩家，请重新读取战绩".into());
         }
         let mut team: Vec<&serde_json::Value> = participants.iter().collect();
         team.sort_by_key(|p| p["participantId"].as_i64().unwrap_or(0));
 
-        let players: Vec<PlayerData> = team.iter().map(|p| {
+        let players: Result<Vec<PlayerData>, &'static str> = team.iter().map(|p| {
             let pid = p["participantId"].as_i64().unwrap_or(0);
             let player_puuid = puuid_map.get(&pid).cloned().unwrap_or_default();
             let champion_id = p["championId"].as_i64().unwrap_or(0);
             let is_me = player_puuid == my_puuid;
 
-            PlayerData {
+            Ok(PlayerData {
+                participant_id: pid,
                 summoner_name: name_map.get(&pid).cloned().unwrap_or("未知".to_string()),
                 champion_id,
                 team_id: p["teamId"].as_i64(),
-                damage: p["stats"]["totalDamageDealtToChampions"].as_i64().unwrap_or(0),
+                damage: p["stats"]["totalDamageDealtToChampions"].as_i64().filter(|value| *value >= 0).ok_or("对英雄伤害数据不完整，请稍后重新读取")?,
                 damage_taken: p["stats"]["totalDamageTaken"].as_i64().unwrap_or(0),
                 gold_earned: p["stats"]["goldEarned"].as_i64().unwrap_or(0),
                 kills: p["stats"]["kills"].as_i64().unwrap_or(0),
@@ -331,15 +422,18 @@ impl LcuConnection {
                 assists: p["stats"]["assists"].as_i64().unwrap_or(0),
                 is_friend: is_me || friend_puuids.contains(&player_puuid),
                 is_me,
-            }
+                is_history_owner: history_owner == Some(player_puuid.as_str()),
+            })
         }).collect();
 
         Ok(GameResult {
             game_id,
             game_mode,
+            is_custom_game,
             game_duration,
             timestamp,
-            players,
+            players: players?,
+            history_owner_puuid: history_owner.map(String::from),
         })
     }
 
